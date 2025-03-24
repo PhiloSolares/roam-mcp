@@ -1,0 +1,377 @@
+from typing import Dict, List, Any, Optional, Union
+import json
+import httpx
+import re
+from datetime import datetime
+from mcp.server.fastmcp import FastMCP
+
+# Initialize FastMCP server
+mcp = FastMCP("roam-helper")
+
+# Constants for API endpoints
+ROAM_API_BASE = "https://api.roamresearch.com/api/graph"
+
+
+class PreserveAuthSession(httpx.Client):
+
+    def rebuild_auth(self, prepared_request, response):
+        return
+
+
+async def make_roam_request(method: str,
+                            endpoint: str,
+                            api_token: str,
+                            graph_name: str,
+                            json_data: Optional[Dict] = None) -> Dict:
+    """Make an authenticated request to the Roam Research API."""
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{ROAM_API_BASE}/{graph_name}/{endpoint}"
+
+    async with httpx.AsyncClient() as client:
+        if method.lower() == "get":
+            response = await client.get(url, headers=headers)
+        else:
+            response = await client.post(url, headers=headers, json=json_data)
+
+        if response.status_code != 200:
+            raise Exception(
+                f"API request failed with status code {response.status_code}: {response.text}"
+            )
+
+        return response.json()
+
+
+def extract_youtube_video_id(url: str) -> Optional[str]:
+    """Extract the video ID from a YouTube URL."""
+    found = re.search(r"(?:youtu\.be\/|watch\?v=)([\w-]+)", url)
+    if found:
+        return found.group(1)
+    return None
+
+
+def process_results(raw_results):
+    """Process raw search results to extract content, remove duplicates, and limit word count."""
+    unique_strings = set()
+    processed_results = []
+    word_count = 0
+    max_word_count = 3000  # Maximum word count limit
+
+    for block_list in raw_results:
+        for block in block_list:
+            block_string = block.get(':block/string')
+            if block_string and block_string not in unique_strings:
+                # Count the number of words in the block string
+                block_word_count = len(block_string.split())
+
+                # Check if adding this block string exceeds the word limit
+                if word_count + block_word_count <= max_word_count:
+                    unique_strings.add(block_string)
+                    processed_results.append(block_string)
+                    word_count += block_word_count
+                else:
+                    # Stop processing if the word limit is reached
+                    return processed_results
+
+    return processed_results
+
+
+async def find_block_uid(api_token, graph_name, block_content):
+    """Search for a block by its content to find its UID."""
+    search_query = f'''[:find (pull ?e [:block/uid])
+                      :where [?e :block/string "{block_content}"]]'''
+
+    search_response = await make_roam_request("post", "q", api_token,
+                                              graph_name,
+                                              {"query": search_query})
+
+    if search_response.get('result'):
+        block_uid = search_response['result'][0][0][':block/uid']
+        return block_uid
+    else:
+        raise Exception("Failed to find the newly created block UID.")
+
+
+async def create_block(api_token, graph_name, parent_uid, block_content,
+                       block_order):
+    """Create a block and handle child blocks by finding the new block's UID."""
+    block_data = {
+        "action": "create-block",
+        "location": {
+            "parent-uid": parent_uid,
+            "order": block_order
+        },
+        "block": {
+            "string": block_content['text']
+        }
+    }
+
+    block_resp = await make_roam_request("post", "write", api_token,
+                                         graph_name, block_data)
+
+    # If the block has children, recursively handle them
+    if 'children' in block_content:
+        new_parent_uid = await find_block_uid(api_token, graph_name,
+                                              block_content['text'])
+        for order, child in enumerate(block_content['children']):
+            await create_block(api_token, graph_name, new_parent_uid, child,
+                               order)
+
+    return block_resp
+
+
+@mcp.tool()
+async def search_roam(api_token: str, graph_name: str,
+                      search_terms: List[str]) -> str:
+    """Search Roam database for content containing the specified terms.
+
+    Args:
+        api_token: Roam Research API token
+        graph_name: Name of the Roam graph to search
+        search_terms: List of keywords to search for
+    """
+    all_results = []
+
+    for keyword in search_terms:
+        query = f'''[:find (pull ?b [*])
+                     :where [?b :block/string ?s]
+                            [(clojure.string/includes? ?s "{keyword}")]]'''
+
+        data = {"query": query.replace("\n", " ")}
+
+        response = await make_roam_request("post", "q", api_token, graph_name,
+                                           data)
+        all_results.extend(response.get('result', []))
+
+    # Process results to extract content, remove duplicates, and limit word count
+    processed_results = process_results(all_results)
+
+    return "\n\n".join(processed_results)
+
+
+@mcp.tool()
+async def create_page(api_token: str, graph_name: str, page_title: str,
+                      content: List[Dict]) -> str:
+    """Create a new page in Roam Research and link it in daily notes.
+
+    Args:
+        api_token: Roam Research API token
+        graph_name: Name of the Roam graph
+        page_title: Title for the new page
+        content: List of content blocks to add to the page
+    """
+    # Check if page exists
+    find_page_query = f'''[:find ?uid
+                         :where [?e :node/title "{page_title}"]
+                                [?e :block/uid ?uid]]'''
+
+    find_page_resp = await make_roam_request("post", "q", api_token,
+                                             graph_name,
+                                             {"query": find_page_query})
+    page_exists = find_page_resp and find_page_resp.get('result')
+    page_uid = find_page_resp.get('result',
+                                  [[None]])[0][0] if page_exists else None
+
+    # Create page if it doesn't exist
+    if not page_exists:
+        create_page_data = {
+            "action": "create-page",
+            "page": {
+                "title": page_title
+            }
+        }
+        create_page_resp = await make_roam_request("post", "write", api_token,
+                                                   graph_name,
+                                                   create_page_data)
+
+        if "page" not in create_page_resp or "uid" not in create_page_resp.get(
+                "page", {}):
+            raise Exception("Failed to create new page")
+
+        page_uid = create_page_resp["page"]["uid"]
+
+    # Add content to the page
+    for block_order, block_content in enumerate(content):
+        await create_block(api_token, graph_name, page_uid, block_content,
+                           block_order)
+
+    # Link in today's daily notes
+    try:
+        today_date = datetime.now().strftime("%B %-dth, %Y")
+        daily_notes_query = f'''[:find ?uid
+                                 :where [?e :node/title "{today_date}"]
+                                        [?e :block/uid ?uid]]'''
+
+        daily_notes_resp = await make_roam_request(
+            "post", "q", api_token, graph_name, {"query": daily_notes_query})
+
+        if daily_notes_resp and daily_notes_resp.get('result'):
+            daily_notes_uid = daily_notes_resp['result'][0][0]
+            link_block_data = {
+                "action": "create-block",
+                "location": {
+                    "parent-uid": daily_notes_uid,
+                    "order": 0
+                },
+                "block": {
+                    "string": f"[[{page_title}]]"
+                }
+            }
+            await make_roam_request("post", "write", api_token, graph_name,
+                                    link_block_data)
+    except Exception as e:
+        # Continue even if linking fails
+        pass
+
+    # Return link to the page
+    roam_page_link = f"https://roamresearch.com/#/app/{graph_name}/page/{page_uid}"
+    return f"Content added to page and linked in Daily Notes: {roam_page_link}"
+
+
+@mcp.tool()
+async def get_youtube_transcript(url: str) -> str:
+    """Fetch and return the transcript of a YouTube video.
+
+    Args:
+        url: URL of the YouTube video
+    """
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
+
+    video_id = extract_youtube_video_id(url)
+    if not video_id:
+        return "Invalid YouTube URL. Unable to extract video ID."
+
+    try:
+        # Define the prioritized list of language codes
+        languages = [
+            'en', 'en-US', 'en-GB', 'de', 'es', 'hi', 'zh', 'ar', 'bn', 'pt',
+            'ru', 'ja', 'pa'
+        ]
+
+        # Attempt to retrieve the available transcripts
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        # Try to find a transcript in the prioritized languages
+        for language in languages:
+            try:
+                transcript = transcript_list.find_transcript([language])
+                # Check if the transcript is manually created or generated, prefer manually created
+                if transcript.is_generated:
+                    continue
+                text = " ".join([line["text"] for line in transcript.fetch()])
+                return text
+            except Exception:
+                continue
+
+        # If no suitable transcript is found in the specified languages, try to fetch a generated transcript
+        try:
+            generated_transcript = transcript_list.find_generated_transcript(
+                languages)
+            text = " ".join(
+                [line["text"] for line in generated_transcript.fetch()])
+            return text
+        except Exception:
+            return "No suitable transcript found for this video."
+
+    except TranscriptsDisabled:
+        return "Transcripts are disabled for this video."
+    except Exception as e:
+        return f"An error occurred while fetching the transcript: {str(e)}"
+
+
+@mcp.resource("roam-graph-info")
+async def get_roam_graph_info(api_token: str, graph_name: str) -> str:
+    """
+    Get information about a Roam Research graph.
+
+    Args:
+        api_token: Roam Research API token
+        graph_name: Name of the Roam graph
+    """
+    try:
+        # Get basic graph information
+        graph_info_query = '''[:find (pull ?g [*])
+                               :where [?g :graph/slug]]'''
+
+        graph_info = await make_roam_request("post", "q", api_token,
+                                             graph_name,
+                                             {"query": graph_info_query})
+
+        # Get page count
+        page_count_query = '''[:find (count ?p)
+                               :where [?p :node/title]]'''
+
+        page_count = await make_roam_request("post", "q", api_token,
+                                             graph_name,
+                                             {"query": page_count_query})
+
+        # Format the output
+        formatted_info = f"""
+Graph Name: {graph_name}
+Pages: {page_count['result'][0][0] if page_count.get('result') else 'Unknown'}
+API Access: Enabled
+        """
+
+        return formatted_info
+    except Exception as e:
+        return f"Error retrieving graph information: {str(e)}"
+
+
+@mcp.prompt()
+async def summarize_page(page_title: str, api_token: str,
+                         graph_name: str) -> dict:
+    """
+    Create a prompt to summarize a page in Roam Research.
+
+    Args:
+        page_title: Title of the page to summarize
+        api_token: Roam Research API token
+        graph_name: Name of the Roam graph
+    """
+    # Query to get the page content
+    query = f'''[:find (pull ?b [:block/string])
+                 :where [?p :node/title "{page_title}"]
+                        [?b :block/page ?p]]'''
+
+    try:
+        response = await make_roam_request("post", "q", api_token, graph_name,
+                                           {"query": query})
+
+        page_blocks = [
+            block[0].get(':block/string', '')
+            for block in response.get('result', [])
+        ]
+        page_content = "\n".join(page_blocks)
+
+        return {
+            "messages": [{
+                "role": "user",
+                "content": {
+                    "type":
+                    "text",
+                    "text":
+                    f"Please provide a concise summary of the following page content from my Roam Research database:\n\n{page_content}"
+                }
+            }]
+        }
+    except Exception as e:
+        return {
+            "messages": [{
+                "role": "user",
+                "content": {
+                    "type":
+                    "text",
+                    "text":
+                    f"I wanted to summarize my Roam page titled '{page_title}', but there was an error retrieving the content: {str(e)}. Can you help me troubleshoot this issue with my Roam Research integration?"
+                }
+            }]
+        }
+
+
+def run_server(transport="stdio", port=None):
+    """Run the MCP server with the specified transport."""
+    mcp.run(transport=transport, port=port)
