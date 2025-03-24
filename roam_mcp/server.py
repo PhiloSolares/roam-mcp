@@ -10,13 +10,8 @@ from mcp.server.fastmcp import FastMCP
 # Initialize FastMCP server
 mcp = FastMCP("roam-helper")
 
-# Define multiple potential API base URLs to try
-ROAM_API_BASES = [
-    "https://api.roamresearch.com/api/graph",
-    "https://api.roamresearch.com/api",
-    "https://roamresearch.com/api/graph",
-    "https://roamresearch.com/api" 
-]
+# Constants for API endpoints
+ROAM_API_BASE = "https://api.roamresearch.com/api/graph"
 
 
 class PreserveAuthSession(httpx.Client):
@@ -30,69 +25,46 @@ async def make_roam_request(method: str,
                             graph_name: str,
                             json_data: Optional[Dict] = None) -> Dict:
     """Make an authenticated request to the Roam Research API."""
-    print(f"Making request to {endpoint} with token starting with: {api_token[:5]}... and graph: {graph_name}", file=sys.stderr)
+    print(f"Making request to {endpoint} with token starting with: {api_token[:8]}... and graph: {graph_name}", file=sys.stderr)
+    
+    # Ensure token is properly formatted (should start with "roam-graph-token-")
+    if not api_token.startswith("roam-graph-token-"):
+        print("WARNING: API token doesn't start with expected prefix 'roam-graph-token-'", file=sys.stderr)
     
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
-        # Disable redirects to see what's happening
-        "Max-Redirects": "0"
     }
 
-    # Try different API base URLs
-    last_error = None
-    for base_url in ROAM_API_BASES:
-        # Try different URL formats
-        urls_to_try = [
-            f"{base_url}/{graph_name}/{endpoint}",
-            f"{base_url}/{graph_name}",
-            f"{base_url}/{endpoint}"
-        ]
-        
-        for url in urls_to_try:
-            print(f"Trying URL: {url}", file=sys.stderr)
+    url = f"{ROAM_API_BASE}/{graph_name}/{endpoint}"
+    print(f"Full URL: {url}", file=sys.stderr)
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            if method.lower() == "get":
+                response = await client.get(url, headers=headers)
+            else:
+                response = await client.post(url, headers=headers, json=json_data)
             
-            try:
-                async with httpx.AsyncClient(follow_redirects=True) as client:
-                    if method.lower() == "get":
-                        response = await client.get(url, headers=headers)
-                    else:
-                        response = await client.post(url, headers=headers, json=json_data)
+            print(f"Response status: {response.status_code}", file=sys.stderr)
+            print(f"Response headers: {response.headers}", file=sys.stderr)
+            
+            if response.status_code == 401:
+                print("Authentication failed. Please check your API token.", file=sys.stderr)
+                print(f"Response body: {response.text}", file=sys.stderr)
+                raise Exception("Authentication failed. Please check your API token.")
                 
-                    print(f"Response status: {response.status_code}", file=sys.stderr)
-                    
-                    if response.status_code == 200:
-                        print("Success! Found working API URL", file=sys.stderr)
-                        return response.json()
-                    
-                    print(f"Response headers: {response.headers}", file=sys.stderr)
-                    if response.status_code == 308:
-                        location = response.headers.get('location')
-                        print(f"Received redirect to: {location}", file=sys.stderr)
-                        
-                        # Try following the redirect manually
-                        if location:
-                            print(f"Following redirect to: {location}", file=sys.stderr)
-                            async with httpx.AsyncClient() as redirect_client:
-                                redirect_response = await redirect_client.request(
-                                    method, 
-                                    location,
-                                    headers=headers,
-                                    json=json_data,
-                                    follow_redirects=True
-                                )
-                                print(f"Redirect response status: {redirect_response.status_code}", file=sys.stderr)
-                                if redirect_response.status_code == 200:
-                                    return redirect_response.json()
-                
-            except Exception as e:
-                print(f"Error with URL {url}: {str(e)}", file=sys.stderr)
-                last_error = e
-                continue
-    
-    # If we reach here, all URLs failed
-    raise Exception(f"All Roam API URLs failed. Last error: {str(last_error)}")
+            if response.status_code != 200:
+                print(f"Error response body: {response.text}", file=sys.stderr)
+                raise Exception(
+                    f"API request failed with status code {response.status_code}: {response.text}"
+                )
+            
+            return response.json()
+        except Exception as e:
+            print(f"Error in make_roam_request: {str(e)}", file=sys.stderr)
+            raise
 
 
 def extract_youtube_video_id(url: str) -> Optional[str]:
@@ -175,12 +147,6 @@ async def create_block(api_token, graph_name, parent_uid, block_content,
 
 def get_roam_credentials():
     """Get Roam API token and graph name from environment variables."""
-    # Print all environment variables for debugging
-    print("Environment variables:", file=sys.stderr)
-    for key, value in os.environ.items():
-        # Only print keys (not values) for security
-        print(f"  {key}", file=sys.stderr)
-    
     api_token = os.environ.get("ROAM_API_TOKEN")
     graph_name = os.environ.get("ROAM_GRAPH_NAME")
     
@@ -217,9 +183,11 @@ async def search_roam(search_terms: List[str]) -> str:
 
         data = {"query": query.replace("\n", " ")}
 
-        response = await make_roam_request("post", "q", api_token, graph_name,
-                                           data)
-        all_results.extend(response.get('result', []))
+        try:
+            response = await make_roam_request("post", "q", api_token, graph_name, data)
+            all_results.extend(response.get('result', []))
+        except Exception as e:
+            return f"Error searching Roam: {str(e)}"
 
     # Process results to extract content, remove duplicates, and limit word count
     processed_results = process_results(all_results)
@@ -239,72 +207,75 @@ async def create_page(page_title: str, content: List[Dict]) -> str:
     if not api_token or not graph_name:
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
-    # Check if page exists
-    find_page_query = f'''[:find ?uid
-                         :where [?e :node/title "{page_title}"]
-                                [?e :block/uid ?uid]]'''
-
-    find_page_resp = await make_roam_request("post", "q", api_token,
-                                             graph_name,
-                                             {"query": find_page_query})
-    page_exists = find_page_resp and find_page_resp.get('result')
-    page_uid = find_page_resp.get('result',
-                                  [[None]])[0][0] if page_exists else None
-
-    # Create page if it doesn't exist
-    if not page_exists:
-        create_page_data = {
-            "action": "create-page",
-            "page": {
-                "title": page_title
-            }
-        }
-        create_page_resp = await make_roam_request("post", "write", api_token,
-                                                   graph_name,
-                                                   create_page_data)
-
-        if "page" not in create_page_resp or "uid" not in create_page_resp.get(
-                "page", {}):
-            raise Exception("Failed to create new page")
-
-        page_uid = create_page_resp["page"]["uid"]
-
-    # Add content to the page
-    for block_order, block_content in enumerate(content):
-        await create_block(api_token, graph_name, page_uid, block_content,
-                           block_order)
-
-    # Link in today's daily notes
     try:
-        today_date = datetime.now().strftime("%B %-dth, %Y")
-        daily_notes_query = f'''[:find ?uid
-                                 :where [?e :node/title "{today_date}"]
-                                        [?e :block/uid ?uid]]'''
+        # Check if page exists
+        find_page_query = f'''[:find ?uid
+                             :where [?e :node/title "{page_title}"]
+                                    [?e :block/uid ?uid]]'''
 
-        daily_notes_resp = await make_roam_request(
-            "post", "q", api_token, graph_name, {"query": daily_notes_query})
+        find_page_resp = await make_roam_request("post", "q", api_token,
+                                                 graph_name,
+                                                 {"query": find_page_query})
+        page_exists = find_page_resp and find_page_resp.get('result')
+        page_uid = find_page_resp.get('result',
+                                      [[None]])[0][0] if page_exists else None
 
-        if daily_notes_resp and daily_notes_resp.get('result'):
-            daily_notes_uid = daily_notes_resp['result'][0][0]
-            link_block_data = {
-                "action": "create-block",
-                "location": {
-                    "parent-uid": daily_notes_uid,
-                    "order": 0
-                },
-                "block": {
-                    "string": f"[[{page_title}]]"
+        # Create page if it doesn't exist
+        if not page_exists:
+            create_page_data = {
+                "action": "create-page",
+                "page": {
+                    "title": page_title
                 }
             }
-            await make_roam_request("post", "write", api_token, graph_name,
-                                    link_block_data)
-    except Exception as e:
-        # Continue even if linking fails
-        pass
+            create_page_resp = await make_roam_request("post", "write", api_token,
+                                                       graph_name,
+                                                       create_page_data)
 
-    # Return link to the page
-    roam_page_link = f"https://roamresearch.com/#/app/{graph_name}/page/{page_uid}"
-    return f"Content added to page and linked in Daily Notes: {roam_page_link}"
+            if "page" not in create_page_resp or "uid" not in create_page_resp.get(
+                    "page", {}):
+                raise Exception("Failed to create new page")
+
+            page_uid = create_page_resp["page"]["uid"]
+
+        # Add content to the page
+        for block_order, block_content in enumerate(content):
+            await create_block(api_token, graph_name, page_uid, block_content,
+                               block_order)
+
+        # Link in today's daily notes
+        try:
+            today_date = datetime.now().strftime("%B %-dth, %Y")
+            daily_notes_query = f'''[:find ?uid
+                                     :where [?e :node/title "{today_date}"]
+                                            [?e :block/uid ?uid]]'''
+
+            daily_notes_resp = await make_roam_request(
+                "post", "q", api_token, graph_name, {"query": daily_notes_query})
+
+            if daily_notes_resp and daily_notes_resp.get('result'):
+                daily_notes_uid = daily_notes_resp['result'][0][0]
+                link_block_data = {
+                    "action": "create-block",
+                    "location": {
+                        "parent-uid": daily_notes_uid,
+                        "order": 0
+                    },
+                    "block": {
+                        "string": f"[[{page_title}]]"
+                    }
+                }
+                await make_roam_request("post", "write", api_token, graph_name,
+                                        link_block_data)
+        except Exception as e:
+            # Continue even if linking fails
+            print(f"Warning: Failed to link to daily notes: {str(e)}", file=sys.stderr)
+
+        # Return link to the page
+        roam_page_link = f"https://roamresearch.com/#/app/{graph_name}/page/{page_uid}"
+        return f"Content added to page and linked in Daily Notes: {roam_page_link}"
+    except Exception as e:
+        return f"Error creating page: {str(e)}"
 
 
 @mcp.tool()
@@ -466,6 +437,10 @@ def run_server(transport="stdio", port=None):
     for key in os.environ:
         # Only print keys (not values) for security
         print(f"  {key}", file=sys.stderr)
+    
+    api_token, graph_name = get_roam_credentials()
+    print(f"API token is set: {bool(api_token)}", file=sys.stderr)
+    print(f"Graph name is set: {bool(graph_name)}", file=sys.stderr)
     
     # FastMCP.run() doesn't accept a port parameter, so we ignore it
     mcp.run(transport=transport)
