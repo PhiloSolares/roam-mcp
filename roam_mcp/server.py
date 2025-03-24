@@ -25,6 +25,8 @@ async def make_roam_request(method: str,
                             graph_name: str,
                             json_data: Optional[Dict] = None) -> Dict:
     """Make an authenticated request to the Roam Research API."""
+    print(f"Making request to {endpoint} with token starting with: {api_token[:5]}... and graph: {graph_name}", file=sys.stderr)
+    
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_token}",
@@ -32,19 +34,28 @@ async def make_roam_request(method: str,
     }
 
     url = f"{ROAM_API_BASE}/{graph_name}/{endpoint}"
+    print(f"Full URL: {url}", file=sys.stderr)
 
     async with httpx.AsyncClient() as client:
-        if method.lower() == "get":
-            response = await client.get(url, headers=headers)
-        else:
-            response = await client.post(url, headers=headers, json=json_data)
-
-        if response.status_code != 200:
-            raise Exception(
-                f"API request failed with status code {response.status_code}: {response.text}"
-            )
-
-        return response.json()
+        try:
+            if method.lower() == "get":
+                response = await client.get(url, headers=headers)
+            else:
+                response = await client.post(url, headers=headers, json=json_data)
+            
+            print(f"Response status: {response.status_code}", file=sys.stderr)
+            if response.status_code == 308:
+                print(f"Received redirect response. Headers: {response.headers}", file=sys.stderr)
+                
+            if response.status_code != 200:
+                raise Exception(
+                    f"API request failed with status code {response.status_code}: {response.text}"
+                )
+            
+            return response.json()
+        except Exception as e:
+            print(f"Error in make_roam_request: {str(e)}", file=sys.stderr)
+            raise
 
 
 def extract_youtube_video_id(url: str) -> Optional[str]:
@@ -127,13 +138,25 @@ async def create_block(api_token, graph_name, parent_uid, block_content,
 
 def get_roam_credentials():
     """Get Roam API token and graph name from environment variables."""
+    # Print all environment variables for debugging
+    print("Environment variables:", file=sys.stderr)
+    for key, value in os.environ.items():
+        # Print key and first few characters of value for security
+        value_preview = value[:5] + "..." if len(value) > 5 else value
+        print(f"  {key}: {value_preview}", file=sys.stderr)
+    
     api_token = os.environ.get("ROAM_API_TOKEN")
     graph_name = os.environ.get("ROAM_GRAPH_NAME")
     
     if not api_token:
         print("Error: ROAM_API_TOKEN environment variable is not set", file=sys.stderr)
+    else:
+        print(f"Found ROAM_API_TOKEN starting with: {api_token[:5]}...", file=sys.stderr)
+        
     if not graph_name:
         print("Error: ROAM_GRAPH_NAME environment variable is not set", file=sys.stderr)
+    else:
+        print(f"Found ROAM_GRAPH_NAME: {graph_name}", file=sys.stderr)
         
     return api_token, graph_name
 
@@ -401,12 +424,13 @@ async def summarize_page(page_title: str) -> dict:
 
 def run_server(transport="stdio", port=None):
     """Run the MCP server with the specified transport."""
-    # Log the retrieved API credentials to help with debugging
-    api_token, graph_name = get_roam_credentials()
-    if api_token and graph_name:
-        print(f"Roam credentials found. Graph: {graph_name}", file=sys.stderr)
-    else:
-        print("WARNING: Roam credentials missing or incomplete!", file=sys.stderr)
+    # Print all environment variables at startup for debugging
+    print("Server starting...", file=sys.stderr)
+    print("Environment variables:", file=sys.stderr)
+    for key, value in os.environ.items():
+        # Print key and first few characters of value for security
+        value_preview = value[:5] + "..." if len(value) > 5 else value
+        print(f"  {key}: {value_preview}", file=sys.stderr)
     
     # FastMCP.run() doesn't accept a port parameter, so we ignore it
     mcp.run(transport=transport)
