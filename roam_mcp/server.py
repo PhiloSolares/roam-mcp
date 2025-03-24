@@ -10,62 +10,112 @@ from mcp.server.fastmcp import FastMCP
 # Initialize FastMCP server
 mcp = FastMCP("roam-helper")
 
-# Constants for API endpoints
-ROAM_API_BASE = "https://api.roamresearch.com/api/graph"
+# First, check for required environment variables and provide clear error messages if missing
+API_TOKEN = os.environ.get("ROAM_API_TOKEN")
+GRAPH_NAME = os.environ.get("ROAM_GRAPH_NAME")
 
-
-class PreserveAuthSession(httpx.Client):
-    def rebuild_auth(self, prepared_request, response):
-        return
-
-
-async def make_roam_request(method: str,
-                            endpoint: str,
-                            api_token: str,
-                            graph_name: str,
-                            json_data: Optional[Dict] = None) -> Dict:
-    """Make an authenticated request to the Roam Research API."""
-    print(f"Making request to {endpoint} with token starting with: {api_token[:8]}... and graph: {graph_name}", file=sys.stderr)
+# Validate environment variables
+if not API_TOKEN or not GRAPH_NAME:
+    missing_vars = []
+    if not API_TOKEN:
+        missing_vars.append("ROAM_API_TOKEN")
+    if not GRAPH_NAME:
+        missing_vars.append("ROAM_GRAPH_NAME")
     
-    # Ensure token is properly formatted (should start with "roam-graph-token-")
-    if not api_token.startswith("roam-graph-token-"):
-        print("WARNING: API token doesn't start with expected prefix 'roam-graph-token-'", file=sys.stderr)
+    error_msg = (
+        f"Missing required environment variables: {', '.join(missing_vars)}\n\n"
+        "Please configure these variables in your Claude Desktop config:\n"
+        "~/Library/Application Support/Claude/claude_desktop_config.json\n\n"
+        'Example configuration:\n'
+        '{\n'
+        '  "mcpServers": {\n'
+        '    "roam-helper": {\n'
+        '      "command": "uvx",\n'
+        '      "args": ["git+https://github.com/PhiloSolares/roam-mcp.git"],\n'
+        '      "env": {\n'
+        f'        "ROAM_API_TOKEN": "your-api-token",\n'
+        f'        "ROAM_GRAPH_NAME": "{GRAPH_NAME or "your-graph-name"}"\n'
+        '      }\n'
+        '    }\n'
+        '  }\n'
+        '}'
+    )
+    print(error_msg, file=sys.stderr)
+    # We'll continue execution but tools will return error messages
+
+class RoamApiClient:
+    """Client for interacting with the Roam Research API."""
+    def __init__(self, api_token, graph_name, timeout=30.0):
+        self.api_token = api_token
+        self.graph_name = graph_name
+        self.base_url = f"https://api.roamresearch.com/api/graph/{graph_name}"
+        self.client = httpx.AsyncClient(verify=True, timeout=timeout)
     
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-
-    url = f"{ROAM_API_BASE}/{graph_name}/{endpoint}"
-    print(f"Full URL: {url}", file=sys.stderr)
-
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        try:
-            if method.lower() == "get":
-                response = await client.get(url, headers=headers)
-            else:
-                response = await client.post(url, headers=headers, json=json_data)
+    async def execute_query(self, query: str) -> Dict:
+        """Execute a Roam Research Datalog query."""
+        if not self.api_token or not self.graph_name:
+            return {"error": "Missing API token or graph name"}
             
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        
+        data = {"query": query}
+        url = f"{self.base_url}/q"
+        
+        try:
+            response = await self.client.post(url, json=data, headers=headers)
             print(f"Response status: {response.status_code}", file=sys.stderr)
-            print(f"Response headers: {response.headers}", file=sys.stderr)
             
             if response.status_code == 401:
                 print("Authentication failed. Please check your API token.", file=sys.stderr)
-                print(f"Response body: {response.text}", file=sys.stderr)
-                raise Exception("Authentication failed. Please check your API token.")
-                
+                return {"error": "Authentication failed. Please check your API token."}
+            
             if response.status_code != 200:
-                print(f"Error response body: {response.text}", file=sys.stderr)
-                raise Exception(
-                    f"API request failed with status code {response.status_code}: {response.text}"
-                )
+                print(f"Error: {response.status_code} - {response.text}", file=sys.stderr)
+                return {"error": f"API request failed: {response.status_code} - {response.text}"}
             
             return response.json()
         except Exception as e:
-            print(f"Error in make_roam_request: {str(e)}", file=sys.stderr)
-            raise
-
+            print(f"Error executing query: {e}", file=sys.stderr)
+            return {"error": f"Error: {str(e)}"}
+    
+    async def execute_write(self, action: str, **kwargs) -> Dict:
+        """Execute a Roam Research write operation."""
+        if not self.api_token or not self.graph_name:
+            return {"error": "Missing API token or graph name"}
+            
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        
+        data = {"action": action, **kwargs}
+        url = f"{self.base_url}/write"
+        
+        try:
+            response = await self.client.post(url, json=data, headers=headers)
+            print(f"Response status: {response.status_code}", file=sys.stderr)
+            
+            if response.status_code == 401:
+                print("Authentication failed. Please check your API token.", file=sys.stderr)
+                return {"error": "Authentication failed. Please check your API token."}
+            
+            if response.status_code != 200:
+                print(f"Error: {response.status_code} - {response.text}", file=sys.stderr)
+                return {"error": f"API request failed: {response.status_code} - {response.text}"}
+            
+            return response.json()
+        except Exception as e:
+            print(f"Error executing write operation: {e}", file=sys.stderr)
+            return {"error": f"Error: {str(e)}"}
+    
+    async def close(self):
+        """Close the HTTP client."""
+        await self.client.aclose()
 
 def extract_youtube_video_id(url: str) -> Optional[str]:
     """Extract the video ID from a YouTube URL."""
@@ -74,9 +124,11 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
         return found.group(1)
     return None
 
-
 def process_results(raw_results):
     """Process raw search results to extract content, remove duplicates, and limit word count."""
+    if isinstance(raw_results, dict) and "error" in raw_results:
+        return [raw_results["error"]]
+    
     unique_strings = set()
     processed_results = []
     word_count = 0
@@ -100,68 +152,9 @@ def process_results(raw_results):
 
     return processed_results
 
-
-async def find_block_uid(api_token, graph_name, block_content):
-    """Search for a block by its content to find its UID."""
-    search_query = f'''[:find (pull ?e [:block/uid])
-                      :where [?e :block/string "{block_content}"]]'''
-
-    search_response = await make_roam_request("post", "q", api_token,
-                                              graph_name,
-                                              {"query": search_query})
-
-    if search_response.get('result'):
-        block_uid = search_response['result'][0][0][':block/uid']
-        return block_uid
-    else:
-        raise Exception("Failed to find the newly created block UID.")
-
-
-async def create_block(api_token, graph_name, parent_uid, block_content,
-                       block_order):
-    """Create a block and handle child blocks by finding the new block's UID."""
-    block_data = {
-        "action": "create-block",
-        "location": {
-            "parent-uid": parent_uid,
-            "order": block_order
-        },
-        "block": {
-            "string": block_content['text']
-        }
-    }
-
-    block_resp = await make_roam_request("post", "write", api_token,
-                                         graph_name, block_data)
-
-    # If the block has children, recursively handle them
-    if 'children' in block_content:
-        new_parent_uid = await find_block_uid(api_token, graph_name,
-                                              block_content['text'])
-        for order, child in enumerate(block_content['children']):
-            await create_block(api_token, graph_name, new_parent_uid, child,
-                               order)
-
-    return block_resp
-
-
-def get_roam_credentials():
-    """Get Roam API token and graph name from environment variables."""
-    api_token = os.environ.get("ROAM_API_TOKEN")
-    graph_name = os.environ.get("ROAM_GRAPH_NAME")
-    
-    if not api_token:
-        print("Error: ROAM_API_TOKEN environment variable is not set", file=sys.stderr)
-    else:
-        print(f"Found ROAM_API_TOKEN, length: {len(api_token)}", file=sys.stderr)
-        
-    if not graph_name:
-        print("Error: ROAM_GRAPH_NAME environment variable is not set", file=sys.stderr)
-    else:
-        print(f"Found ROAM_GRAPH_NAME: {graph_name}", file=sys.stderr)
-        
-    return api_token, graph_name
-
+async def create_roam_client():
+    """Create a Roam API client with credentials from environment variables."""
+    return RoamApiClient(API_TOKEN, GRAPH_NAME)
 
 @mcp.tool()
 async def search_roam(search_terms: List[str]) -> str:
@@ -170,30 +163,32 @@ async def search_roam(search_terms: List[str]) -> str:
     Args:
         search_terms: List of keywords to search for
     """
-    api_token, graph_name = get_roam_credentials()
-    if not api_token or not graph_name:
+    if not API_TOKEN or not GRAPH_NAME:
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
-    all_results = []
+    client = await create_roam_client()
+    try:
+        all_results = []
+        for keyword in search_terms:
+            query = f'''[:find (pull ?b [*])
+                         :where [?b :block/string ?s]
+                                [(clojure.string/includes? ?s "{keyword}")]]'''
 
-    for keyword in search_terms:
-        query = f'''[:find (pull ?b [*])
-                     :where [?b :block/string ?s]
-                            [(clojure.string/includes? ?s "{keyword}")]]'''
-
-        data = {"query": query.replace("\n", " ")}
-
-        try:
-            response = await make_roam_request("post", "q", api_token, graph_name, data)
+            response = await client.execute_query(query)
+            if "error" in response:
+                await client.close()
+                return f"Error searching Roam: {response['error']}"
+            
             all_results.extend(response.get('result', []))
-        except Exception as e:
-            return f"Error searching Roam: {str(e)}"
-
-    # Process results to extract content, remove duplicates, and limit word count
-    processed_results = process_results(all_results)
-
-    return "\n\n".join(processed_results)
-
+        
+        # Process results to extract content, remove duplicates, and limit word count
+        processed_results = process_results(all_results)
+        await client.close()
+        
+        return "\n\n".join(processed_results)
+    except Exception as e:
+        await client.close()
+        return f"Error searching Roam: {str(e)}"
 
 @mcp.tool()
 async def create_page(page_title: str, content: List[Dict]) -> str:
@@ -203,80 +198,115 @@ async def create_page(page_title: str, content: List[Dict]) -> str:
         page_title: Title for the new page
         content: List of content blocks to add to the page
     """
-    api_token, graph_name = get_roam_credentials()
-    if not api_token or not graph_name:
+    if not API_TOKEN or not GRAPH_NAME:
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
+    client = await create_roam_client()
     try:
         # Check if page exists
-        find_page_query = f'''[:find ?uid
-                             :where [?e :node/title "{page_title}"]
-                                    [?e :block/uid ?uid]]'''
-
-        find_page_resp = await make_roam_request("post", "q", api_token,
-                                                 graph_name,
-                                                 {"query": find_page_query})
-        page_exists = find_page_resp and find_page_resp.get('result')
-        page_uid = find_page_resp.get('result',
-                                      [[None]])[0][0] if page_exists else None
-
-        # Create page if it doesn't exist
-        if not page_exists:
-            create_page_data = {
-                "action": "create-page",
-                "page": {
-                    "title": page_title
+        query = f'''[:find ?uid
+                     :where [?e :node/title "{page_title}"]
+                            [?e :block/uid ?uid]]'''
+        
+        response = await client.execute_query(query)
+        if "error" in response:
+            await client.close()
+            return f"Error checking if page exists: {response['error']}"
+        
+        result = response.get('result', [])
+        if result:
+            page_uid = result[0][0]
+            print(f"Page exists with UID: {page_uid}", file=sys.stderr)
+        else:
+            # Create new page
+            create_result = await client.execute_write("create-page", page={"title": page_title})
+            if "error" in create_result:
+                await client.close()
+                return f"Error creating page: {create_result['error']}"
+            
+            page_uid = create_result.get("page", {}).get("uid")
+            if not page_uid:
+                await client.close()
+                return "Failed to get UID for newly created page"
+            
+            print(f"Created new page with UID: {page_uid}", file=sys.stderr)
+        
+        # Add content blocks
+        for i, block in enumerate(content):
+            block_data = await client.execute_write(
+                "create-block",
+                location={
+                    "parent-uid": page_uid,
+                    "order": i
+                },
+                block={
+                    "string": block.get("text", "")
                 }
-            }
-            create_page_resp = await make_roam_request("post", "write", api_token,
-                                                       graph_name,
-                                                       create_page_data)
-
-            if "page" not in create_page_resp or "uid" not in create_page_resp.get(
-                    "page", {}):
-                raise Exception("Failed to create new page")
-
-            page_uid = create_page_resp["page"]["uid"]
-
-        # Add content to the page
-        for block_order, block_content in enumerate(content):
-            await create_block(api_token, graph_name, page_uid, block_content,
-                               block_order)
-
-        # Link in today's daily notes
-        try:
-            today_date = datetime.now().strftime("%B %-dth, %Y")
-            daily_notes_query = f'''[:find ?uid
-                                     :where [?e :node/title "{today_date}"]
-                                            [?e :block/uid ?uid]]'''
-
-            daily_notes_resp = await make_roam_request(
-                "post", "q", api_token, graph_name, {"query": daily_notes_query})
-
-            if daily_notes_resp and daily_notes_resp.get('result'):
-                daily_notes_uid = daily_notes_resp['result'][0][0]
-                link_block_data = {
-                    "action": "create-block",
-                    "location": {
-                        "parent-uid": daily_notes_uid,
-                        "order": 0
-                    },
-                    "block": {
-                        "string": f"[[{page_title}]]"
-                    }
+            )
+            
+            if "error" in block_data:
+                await client.close()
+                return f"Error adding content block: {block_data['error']}"
+            
+            # Handle children if present
+            if "children" in block and block["children"]:
+                # We need to find the UID of the newly created block
+                child_query = f'''[:find ?uid
+                                   :where [?b :block/string "{block.get('text', '')}"]
+                                          [?b :block/uid ?uid]]'''
+                
+                child_response = await client.execute_query(child_query)
+                if "error" not in child_response and child_response.get('result'):
+                    parent_uid = child_response['result'][0][0]
+                    
+                    for j, child in enumerate(block["children"]):
+                        child_data = await client.execute_write(
+                            "create-block",
+                            location={
+                                "parent-uid": parent_uid,
+                                "order": j
+                            },
+                            block={
+                                "string": child.get("text", "")
+                            }
+                        )
+                        
+                        if "error" in child_data:
+                            print(f"Error adding child block: {child_data['error']}", file=sys.stderr)
+        
+        # Try to link to today's daily notes
+        today_date = datetime.now().strftime("%B %-dth, %Y")
+        daily_query = f'''[:find ?uid
+                           :where [?e :node/title "{today_date}"]
+                                  [?e :block/uid ?uid]]'''
+        
+        daily_response = await client.execute_query(daily_query)
+        if "error" not in daily_response and daily_response.get('result'):
+            daily_uid = daily_response['result'][0][0]
+            
+            link_data = await client.execute_write(
+                "create-block",
+                location={
+                    "parent-uid": daily_uid,
+                    "order": 0
+                },
+                block={
+                    "string": f"[[{page_title}]]"
                 }
-                await make_roam_request("post", "write", api_token, graph_name,
-                                        link_block_data)
-        except Exception as e:
-            # Continue even if linking fails
-            print(f"Warning: Failed to link to daily notes: {str(e)}", file=sys.stderr)
-
-        # Return link to the page
-        roam_page_link = f"https://roamresearch.com/#/app/{graph_name}/page/{page_uid}"
-        return f"Content added to page and linked in Daily Notes: {roam_page_link}"
+            )
+            
+            if "error" in link_data:
+                print(f"Error linking to daily notes: {link_data['error']}", file=sys.stderr)
+        
+        # Return success message with link
+        graph_link = f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
+        await client.close()
+        return f"Content added to page and linked in Daily Notes: {graph_link}"
+    
     except Exception as e:
+        if client:
+            await client.close()
         return f"Error creating page: {str(e)}"
-
 
 @mcp.tool()
 async def get_youtube_transcript(url: str) -> str:
@@ -328,45 +358,47 @@ async def get_youtube_transcript(url: str) -> str:
     except Exception as e:
         return f"An error occurred while fetching the transcript: {str(e)}"
 
-
 @mcp.tool()
 async def get_roam_graph_info() -> str:
     """
     Get information about a Roam Research graph.
     """
-    # Get API token and graph name from environment variables
-    api_token, graph_name = get_roam_credentials()
-    if not api_token or not graph_name:
+    if not API_TOKEN or not GRAPH_NAME:
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
+    client = await create_roam_client()
     try:
         # Get basic graph information
         graph_info_query = '''[:find (pull ?g [*])
                                :where [?g :graph/slug]]'''
-
-        graph_info = await make_roam_request("post", "q", api_token,
-                                             graph_name,
-                                             {"query": graph_info_query})
-
+        
+        graph_info = await client.execute_query(graph_info_query)
+        if "error" in graph_info:
+            await client.close()
+            return f"Error retrieving graph information: {graph_info['error']}"
+        
         # Get page count
         page_count_query = '''[:find (count ?p)
                                :where [?p :node/title]]'''
-
-        page_count = await make_roam_request("post", "q", api_token,
-                                             graph_name,
-                                             {"query": page_count_query})
-
+        
+        page_count = await client.execute_query(page_count_query)
+        if "error" in page_count:
+            await client.close()
+            return f"Error retrieving page count: {page_count['error']}"
+        
         # Format the output
         formatted_info = f"""
-Graph Name: {graph_name}
-Pages: {page_count['result'][0][0] if page_count.get('result') else 'Unknown'}
+Graph Name: {GRAPH_NAME}
+Pages: {page_count.get('result', [[0]])[0][0] if page_count.get('result') else 'Unknown'}
 API Access: Enabled
         """
-
+        
+        await client.close()
         return formatted_info
     except Exception as e:
+        if client:
+            await client.close()
         return f"Error retrieving graph information: {str(e)}"
-
 
 @mcp.prompt()
 async def summarize_page(page_title: str) -> dict:
@@ -376,9 +408,7 @@ async def summarize_page(page_title: str) -> dict:
     Args:
         page_title: Title of the page to summarize
     """
-    # Get API token and graph name from environment variables
-    api_token, graph_name = get_roam_credentials()
-    if not api_token or not graph_name:
+    if not API_TOKEN or not GRAPH_NAME:
         return {
             "messages": [{
                 "role": "user",
@@ -389,58 +419,68 @@ async def summarize_page(page_title: str) -> dict:
             }]
         }
     
-    # Query to get the page content
-    query = f'''[:find (pull ?b [:block/string])
-                 :where [?p :node/title "{page_title}"]
-                        [?b :block/page ?p]]'''
-
+    client = await create_roam_client()
     try:
-        response = await make_roam_request("post", "q", api_token, graph_name,
-                                           {"query": query})
-
+        # Query to get the page content
+        query = f'''[:find (pull ?b [:block/string])
+                     :where [?p :node/title "{page_title}"]
+                            [?b :block/page ?p]]'''
+        
+        response = await client.execute_query(query)
+        if "error" in response:
+            await client.close()
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": f"Error retrieving page content: {response['error']}"
+                    }
+                }]
+            }
+        
         page_blocks = [
             block[0].get(':block/string', '')
             for block in response.get('result', [])
         ]
         page_content = "\n".join(page_blocks)
-
+        
+        await client.close()
         return {
             "messages": [{
                 "role": "user",
                 "content": {
-                    "type":
-                    "text",
-                    "text":
-                    f"Please provide a concise summary of the following page content from my Roam Research database:\n\n{page_content}"
+                    "type": "text",
+                    "text": f"Please provide a concise summary of the following page content from my Roam Research database:\n\n{page_content}"
                 }
             }]
         }
     except Exception as e:
+        if client:
+            await client.close()
         return {
             "messages": [{
                 "role": "user",
                 "content": {
-                    "type":
-                    "text",
-                    "text":
-                    f"I wanted to summarize my Roam page titled '{page_title}', but there was an error retrieving the content: {str(e)}. Can you help me troubleshoot this issue with my Roam Research integration?"
+                    "type": "text",
+                    "text": f"I wanted to summarize my Roam page titled '{page_title}', but there was an error retrieving the content: {str(e)}. Can you help me troubleshoot this issue with my Roam Research integration?"
                 }
             }]
         }
 
-
 def run_server(transport="stdio", port=None):
     """Run the MCP server with the specified transport."""
-    # Print all environment variables at startup for debugging
     print("Server starting...", file=sys.stderr)
-    print("Environment variables:", file=sys.stderr)
-    for key in os.environ:
-        # Only print keys (not values) for security
-        print(f"  {key}", file=sys.stderr)
     
-    api_token, graph_name = get_roam_credentials()
-    print(f"API token is set: {bool(api_token)}", file=sys.stderr)
-    print(f"Graph name is set: {bool(graph_name)}", file=sys.stderr)
+    # Print information about API token and graph name
+    print(f"API token is {'set' if API_TOKEN else 'NOT SET'}", file=sys.stderr)
+    print(f"Graph name is {'set' if GRAPH_NAME else 'NOT SET'}", file=sys.stderr)
+    
+    if API_TOKEN and GRAPH_NAME:
+        print(f"API token length: {len(API_TOKEN)}", file=sys.stderr)
+        print(f"Graph name: {GRAPH_NAME}", file=sys.stderr)
+    else:
+        print("WARNING: Missing required environment variables for Roam API", file=sys.stderr)
     
     # FastMCP.run() doesn't accept a port parameter, so we ignore it
     mcp.run(transport=transport)
