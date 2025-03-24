@@ -390,4 +390,5 @@ async def summarize_page(page_title: str) -> dict:
 
 def run_server(transport="stdio", port=None):
     """Run the MCP server with the specified transport."""
-    mcp.run(transport=transport, port=port)
+    # FastMCP.run() doesn't accept a port parameter, so we ignore it
+    mcp.run(transport=transport)
