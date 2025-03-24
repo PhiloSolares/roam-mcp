@@ -12,7 +12,7 @@
   "mcpServers": {
     "roam-helper": {
       "command": "uvx",
-      "args": ["git+https://github.com/yourusername/roam-mcp.git"],
+      "args": ["git+https://github.com/PhiloSolares/roam-mcp.git"],
       "env": {
         "ROAM_API_TOKEN": "<your_roam_api_token>",
         "ROAM_GRAPH_NAME": "<your_roam_graph_name>"
