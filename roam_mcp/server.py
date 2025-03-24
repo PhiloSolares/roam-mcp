@@ -10,8 +10,13 @@ from mcp.server.fastmcp import FastMCP
 # Initialize FastMCP server
 mcp = FastMCP("roam-helper")
 
-# Constants for API endpoints
-ROAM_API_BASE = "https://api.roamresearch.com/api/graph"
+# Define multiple potential API base URLs to try
+ROAM_API_BASES = [
+    "https://api.roamresearch.com/api/graph",
+    "https://api.roamresearch.com/api",
+    "https://roamresearch.com/api/graph",
+    "https://roamresearch.com/api" 
+]
 
 
 class PreserveAuthSession(httpx.Client):
@@ -31,31 +36,63 @@ async def make_roam_request(method: str,
         "Accept": "application/json",
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
+        # Disable redirects to see what's happening
+        "Max-Redirects": "0"
     }
 
-    url = f"{ROAM_API_BASE}/{graph_name}/{endpoint}"
-    print(f"Full URL: {url}", file=sys.stderr)
-
-    async with httpx.AsyncClient() as client:
-        try:
-            if method.lower() == "get":
-                response = await client.get(url, headers=headers)
-            else:
-                response = await client.post(url, headers=headers, json=json_data)
+    # Try different API base URLs
+    last_error = None
+    for base_url in ROAM_API_BASES:
+        # Try different URL formats
+        urls_to_try = [
+            f"{base_url}/{graph_name}/{endpoint}",
+            f"{base_url}/{graph_name}",
+            f"{base_url}/{endpoint}"
+        ]
+        
+        for url in urls_to_try:
+            print(f"Trying URL: {url}", file=sys.stderr)
             
-            print(f"Response status: {response.status_code}", file=sys.stderr)
-            if response.status_code == 308:
-                print(f"Received redirect response. Headers: {response.headers}", file=sys.stderr)
+            try:
+                async with httpx.AsyncClient(follow_redirects=True) as client:
+                    if method.lower() == "get":
+                        response = await client.get(url, headers=headers)
+                    else:
+                        response = await client.post(url, headers=headers, json=json_data)
                 
-            if response.status_code != 200:
-                raise Exception(
-                    f"API request failed with status code {response.status_code}: {response.text}"
-                )
-            
-            return response.json()
-        except Exception as e:
-            print(f"Error in make_roam_request: {str(e)}", file=sys.stderr)
-            raise
+                    print(f"Response status: {response.status_code}", file=sys.stderr)
+                    
+                    if response.status_code == 200:
+                        print("Success! Found working API URL", file=sys.stderr)
+                        return response.json()
+                    
+                    print(f"Response headers: {response.headers}", file=sys.stderr)
+                    if response.status_code == 308:
+                        location = response.headers.get('location')
+                        print(f"Received redirect to: {location}", file=sys.stderr)
+                        
+                        # Try following the redirect manually
+                        if location:
+                            print(f"Following redirect to: {location}", file=sys.stderr)
+                            async with httpx.AsyncClient() as redirect_client:
+                                redirect_response = await redirect_client.request(
+                                    method, 
+                                    location,
+                                    headers=headers,
+                                    json=json_data,
+                                    follow_redirects=True
+                                )
+                                print(f"Redirect response status: {redirect_response.status_code}", file=sys.stderr)
+                                if redirect_response.status_code == 200:
+                                    return redirect_response.json()
+                
+            except Exception as e:
+                print(f"Error with URL {url}: {str(e)}", file=sys.stderr)
+                last_error = e
+                continue
+    
+    # If we reach here, all URLs failed
+    raise Exception(f"All Roam API URLs failed. Last error: {str(last_error)}")
 
 
 def extract_youtube_video_id(url: str) -> Optional[str]:
@@ -141,9 +178,8 @@ def get_roam_credentials():
     # Print all environment variables for debugging
     print("Environment variables:", file=sys.stderr)
     for key, value in os.environ.items():
-        # Print key and first few characters of value for security
-        value_preview = value[:5] + "..." if len(value) > 5 else value
-        print(f"  {key}: {value_preview}", file=sys.stderr)
+        # Only print keys (not values) for security
+        print(f"  {key}", file=sys.stderr)
     
     api_token = os.environ.get("ROAM_API_TOKEN")
     graph_name = os.environ.get("ROAM_GRAPH_NAME")
@@ -151,7 +187,7 @@ def get_roam_credentials():
     if not api_token:
         print("Error: ROAM_API_TOKEN environment variable is not set", file=sys.stderr)
     else:
-        print(f"Found ROAM_API_TOKEN starting with: {api_token[:5]}...", file=sys.stderr)
+        print(f"Found ROAM_API_TOKEN, length: {len(api_token)}", file=sys.stderr)
         
     if not graph_name:
         print("Error: ROAM_GRAPH_NAME environment variable is not set", file=sys.stderr)
@@ -427,10 +463,9 @@ def run_server(transport="stdio", port=None):
     # Print all environment variables at startup for debugging
     print("Server starting...", file=sys.stderr)
     print("Environment variables:", file=sys.stderr)
-    for key, value in os.environ.items():
-        # Print key and first few characters of value for security
-        value_preview = value[:5] + "..." if len(value) > 5 else value
-        print(f"  {key}: {value_preview}", file=sys.stderr)
+    for key in os.environ:
+        # Only print keys (not values) for security
+        print(f"  {key}", file=sys.stderr)
     
     # FastMCP.run() doesn't accept a port parameter, so we ignore it
     mcp.run(transport=transport)
