@@ -2,6 +2,7 @@ from typing import Dict, List, Any, Optional, Union
 import json
 import httpx
 import re
+import os
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 
@@ -284,14 +285,17 @@ async def get_youtube_transcript(url: str) -> str:
 
 
 @mcp.resource("roam-graph-info")
-async def get_roam_graph_info(api_token: str, graph_name: str) -> str:
+async def get_roam_graph_info() -> str:
     """
     Get information about a Roam Research graph.
-
-    Args:
-        api_token: Roam Research API token
-        graph_name: Name of the Roam graph
     """
+    # Get API token and graph name from environment variables
+    api_token = os.environ.get("ROAM_API_TOKEN")
+    graph_name = os.environ.get("ROAM_GRAPH_NAME")
+    
+    if not api_token or not graph_name:
+        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+    
     try:
         # Get basic graph information
         graph_info_query = '''[:find (pull ?g [*])
@@ -322,16 +326,28 @@ API Access: Enabled
 
 
 @mcp.prompt()
-async def summarize_page(page_title: str, api_token: str,
-                         graph_name: str) -> dict:
+async def summarize_page(page_title: str) -> dict:
     """
     Create a prompt to summarize a page in Roam Research.
 
     Args:
         page_title: Title of the page to summarize
-        api_token: Roam Research API token
-        graph_name: Name of the Roam graph
     """
+    # Get API token and graph name from environment variables
+    api_token = os.environ.get("ROAM_API_TOKEN")
+    graph_name = os.environ.get("ROAM_GRAPH_NAME")
+    
+    if not api_token or not graph_name:
+        return {
+            "messages": [{
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+                }
+            }]
+        }
+    
     # Query to get the page content
     query = f'''[:find (pull ?b [:block/string])
                  :where [?p :node/title "{page_title}"]
