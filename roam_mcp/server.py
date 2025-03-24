@@ -3,6 +3,7 @@ import json
 import httpx
 import re
 import os
+import sys
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 
@@ -14,7 +15,6 @@ ROAM_API_BASE = "https://api.roamresearch.com/api/graph"
 
 
 class PreserveAuthSession(httpx.Client):
-
     def rebuild_auth(self, prepared_request, response):
         return
 
@@ -125,16 +125,30 @@ async def create_block(api_token, graph_name, parent_uid, block_content,
     return block_resp
 
 
+def get_roam_credentials():
+    """Get Roam API token and graph name from environment variables."""
+    api_token = os.environ.get("ROAM_API_TOKEN")
+    graph_name = os.environ.get("ROAM_GRAPH_NAME")
+    
+    if not api_token:
+        print("Error: ROAM_API_TOKEN environment variable is not set", file=sys.stderr)
+    if not graph_name:
+        print("Error: ROAM_GRAPH_NAME environment variable is not set", file=sys.stderr)
+        
+    return api_token, graph_name
+
+
 @mcp.tool()
-async def search_roam(api_token: str, graph_name: str,
-                      search_terms: List[str]) -> str:
+async def search_roam(search_terms: List[str]) -> str:
     """Search Roam database for content containing the specified terms.
 
     Args:
-        api_token: Roam Research API token
-        graph_name: Name of the Roam graph to search
         search_terms: List of keywords to search for
     """
+    api_token, graph_name = get_roam_credentials()
+    if not api_token or not graph_name:
+        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+    
     all_results = []
 
     for keyword in search_terms:
@@ -155,16 +169,17 @@ async def search_roam(api_token: str, graph_name: str,
 
 
 @mcp.tool()
-async def create_page(api_token: str, graph_name: str, page_title: str,
-                      content: List[Dict]) -> str:
+async def create_page(page_title: str, content: List[Dict]) -> str:
     """Create a new page in Roam Research and link it in daily notes.
 
     Args:
-        api_token: Roam Research API token
-        graph_name: Name of the Roam graph
         page_title: Title for the new page
         content: List of content blocks to add to the page
     """
+    api_token, graph_name = get_roam_credentials()
+    if not api_token or not graph_name:
+        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+    
     # Check if page exists
     find_page_query = f'''[:find ?uid
                          :where [?e :node/title "{page_title}"]
@@ -290,9 +305,7 @@ async def get_roam_graph_info() -> str:
     Get information about a Roam Research graph.
     """
     # Get API token and graph name from environment variables
-    api_token = os.environ.get("ROAM_API_TOKEN")
-    graph_name = os.environ.get("ROAM_GRAPH_NAME")
-    
+    api_token, graph_name = get_roam_credentials()
     if not api_token or not graph_name:
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
@@ -334,9 +347,7 @@ async def summarize_page(page_title: str) -> dict:
         page_title: Title of the page to summarize
     """
     # Get API token and graph name from environment variables
-    api_token = os.environ.get("ROAM_API_TOKEN")
-    graph_name = os.environ.get("ROAM_GRAPH_NAME")
-    
+    api_token, graph_name = get_roam_credentials()
     if not api_token or not graph_name:
         return {
             "messages": [{
@@ -390,5 +401,12 @@ async def summarize_page(page_title: str) -> dict:
 
 def run_server(transport="stdio", port=None):
     """Run the MCP server with the specified transport."""
+    # Log the retrieved API credentials to help with debugging
+    api_token, graph_name = get_roam_credentials()
+    if api_token and graph_name:
+        print(f"Roam credentials found. Graph: {graph_name}", file=sys.stderr)
+    else:
+        print("WARNING: Roam credentials missing or incomplete!", file=sys.stderr)
+    
     # FastMCP.run() doesn't accept a port parameter, so we ignore it
     mcp.run(transport=transport)
