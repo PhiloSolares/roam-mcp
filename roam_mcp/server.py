@@ -284,7 +284,7 @@ async def get_youtube_transcript(url: str) -> str:
         return f"An error occurred while fetching the transcript: {str(e)}"
 
 
-@mcp.resource("roam-graph-info")
+@mcp.tool()
 async def get_roam_graph_info() -> str:
     """
     Get information about a Roam Research graph.
