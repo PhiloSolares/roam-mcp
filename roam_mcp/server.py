@@ -12,7 +12,8 @@ from roam_mcp.api import (
     API_TOKEN,
     GRAPH_NAME,
     MEMORIES_TAG,
-    get_page_content
+    get_page_content,
+    APIError
 )
 from roam_mcp.search import (
     search_by_text,
@@ -98,6 +99,8 @@ async def roam_fetch_page_by_title(title: str) -> str:
     try:
         content = get_page_content(title)
         return content
+    except APIError as e:
+        return f"Error fetching page: {str(e)}"
     except Exception as e:
         return f"Error fetching page: {str(e)}"
 
@@ -441,8 +444,8 @@ async def roam_search_by_date(start_date: str, end_date: Optional[str] = None,
     Args:
         start_date: Start date in ISO format (YYYY-MM-DD)
         end_date: Optional: End date in ISO format (YYYY-MM-DD)
-        type_filter: Whether to search by creation date, modification date, or both
-        scope: Whether to search blocks, pages, or both
+        type_filter: Whether to search by "created", "modified", or "both"
+        scope: Whether to search "blocks", "pages", or "both"
         include_content: Whether to include the content of matching blocks/pages
     """
     if not API_TOKEN or not GRAPH_NAME:

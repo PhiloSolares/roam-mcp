@@ -1,6 +1,5 @@
 """Memory system operations for the Roam MCP server."""
 
-import logging
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 
@@ -10,16 +9,12 @@ from roam_mcp.api import (
     GRAPH_NAME,
     get_daily_page,
     add_block_to_page,
-    MEMORIES_TAG,
-    APIError
+    MEMORIES_TAG
 )
 from roam_mcp.utils import (
     format_roam_date,
     resolve_block_references
 )
-
-# Set up logging
-logger = logging.getLogger("roam-mcp.memory")
 
 
 def remember(memory: str, categories: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -65,7 +60,6 @@ def remember(memory: str, categories: Optional[List[str]] = None) -> Dict[str, A
             "content": formatted_memory
         }
     except Exception as e:
-        logger.error(f"Error storing memory: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -85,24 +79,7 @@ def recall(sort_by: str = "newest", filter_tag: Optional[str] = None) -> Dict[st
     """
     session, headers = get_session_and_headers()
     
-===
-    </search>
-    <content>
-===
-def recall(sort_by: str = "newest", filter_tag: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Recall stored memories, optionally filtered by tag.
-    
-    Args:
-        sort_by: Sort order ("newest" or "oldest")
-        filter_tag: Optional tag to filter memories by
-        
-    Returns:
-        List of memory contents
-    """
-    session, headers = get_session_and_headers()
-    
-    # Clean the MEMORIES_TAG for use in queries
+    # Clean the MEMORIES_TAG
     clean_tag = MEMORIES_TAG.replace('#', '').replace('[[', '').replace(']]', '')
     
     try:
@@ -202,7 +179,6 @@ def recall(sort_by: str = "newest", filter_tag: Optional[str] = None) -> Dict[st
             "message": f"Found {len(unique_memories)} memories"
         }
     except Exception as e:
-        logger.error(f"Error recalling memories: {str(e)}")
         return {
             "success": False,
             "error": str(e)

@@ -8,13 +8,17 @@ from typing import Dict, List, Any, Optional, Union, Set, Tuple
 import requests
 from datetime import datetime
 import json
-from dotenv import load_dotenv
+
+from roam_mcp.utils import (
+    format_roam_date,
+    find_block_uid,
+    find_page_by_title,
+    process_nested_content,
+    resolve_block_references
+)
 
 # Set up logging
 logger = logging.getLogger("roam-mcp.api")
-
-# Try to load environment variables from .env files
-load_dotenv()
 
 # Get API credentials from environment variables
 API_TOKEN = os.environ.get("ROAM_API_TOKEN")
@@ -82,9 +86,9 @@ def execute_query(query: str, inputs: Optional[List[Any]] = None) -> Any:
     
     # Prepare query data
     data = {
-        "query": query
+        "query": query,
     }
-    if inputs and len(inputs) > 0:
+    if inputs:
         data["inputs"] = inputs
     
     # Log query (without inputs for security)
@@ -161,156 +165,6 @@ def execute_write_action(action_data: Dict[str, Any]) -> Dict[str, Any]:
         
         logger.error(error_msg)
         raise APIError(error_msg) from e
-
-
-def find_block_uid(session, headers, graph_name: str, block_content: str) -> str:
-    """
-    Search for a block by its content to find its UID.
-    
-    Args:
-        session: Active session for API requests
-        headers: Request headers with authentication
-        graph_name: Roam graph name
-        block_content: Content to search for
-        
-    Returns:
-        Block UID
-        
-    Raises:
-        APIError: If block not found
-    """
-    # Escape quotes in content
-    escaped_content = block_content.replace('"', '\\"')
-    
-    search_query = f'''[:find (pull ?e [:block/uid])
-                      :where [?e :block/string "{escaped_content}"]]'''
-    
-    search_response = session.post(
-        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-        headers=headers,
-        json={"query": search_query}
-    )
-    
-    if search_response.status_code == 200 and search_response.json().get('result'):
-        try:
-            block_uid = search_response.json()['result'][0][0][':block/uid']
-            return block_uid
-        except (IndexError, KeyError):
-            raise APIError("Failed to parse block UID from response")
-    else:
-        raise APIError("Failed to find the block UID")
-
-
-def find_page_by_title(session, headers, graph_name: str, title: str) -> Optional[str]:
-    """
-    Find a page by title, with case-insensitive matching.
-    
-    Args:
-        session: Active session for API requests
-        headers: Request headers with authentication
-        graph_name: Roam graph name
-        title: Page title to search for
-        
-    Returns:
-        Page UID or None if not found
-    """
-    # Check for UID format first (9 characters)
-    if len(title) == 9 and re.match(r'^[a-zA-Z0-9_-]{9}$', title):
-        # Try direct UID lookup
-        query = f'''[:find ?uid .
-                   :where [?e :block/uid "{title}"]
-                          [?e :block/uid ?uid]]'''
-        
-        response = session.post(
-            f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-            headers=headers,
-            json={"query": query}
-        )
-        
-        if response.status_code == 200 and response.json().get('result'):
-            return response.json()['result']
-    
-    # Check exact match first
-    query = f'''[:find ?uid .
-                :where [?e :node/title "{title}"]
-                        [?e :block/uid ?uid]]'''
-    
-    response = session.post(
-        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-        headers=headers,
-        json={"query": query}
-    )
-    
-    if response.status_code == 200 and response.json().get('result'):
-        return response.json()['result']
-    
-    # Try case-insensitive match
-    query = f'''[:find ?title ?uid
-                :where [?e :node/title ?title]
-                        [?e :block/uid ?uid]]'''
-    
-    response = session.post(
-        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-        headers=headers,
-        json={"query": query}
-    )
-    
-    if response.status_code == 200 and response.json().get('result'):
-        for result_title, uid in response.json()['result']:
-            if result_title.lower() == title.lower():
-                return uid
-    
-    return None
-
-
-def resolve_block_references(session, headers, graph_name: str, content: str, max_depth: int = 3, current_depth: int = 0) -> str:
-    """
-    Resolve block references in content recursively.
-    
-    Args:
-        session: Active session for API requests
-        headers: Request headers with authentication
-        graph_name: Roam graph name
-        content: Content with potential block references
-        max_depth: Maximum recursion depth
-        current_depth: Current recursion depth
-        
-    Returns:
-        Content with block references resolved
-    """
-    if current_depth >= max_depth:
-        return content
-    
-    # Find all block references
-    ref_pattern = r'\(\(([a-zA-Z0-9_-]{9})\)\)'
-    refs = re.findall(ref_pattern, content)
-    
-    if not refs:
-        return content
-    
-    # Get content for each referenced block
-    for ref in refs:
-        query = f'''[:find ?string .
-                    :where [?b :block/uid "{ref}"]
-                            [?b :block/string ?string]]'''
-        
-        response = session.post(
-            f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-            headers=headers,
-            json={"query": query}
-        )
-        
-        if response.status_code == 200 and response.json().get('result'):
-            ref_content = response.json()['result']
-            # Recursively resolve references in the referenced content
-            resolved_ref = resolve_block_references(
-                session, headers, graph_name,
-                ref_content, max_depth, current_depth + 1
-            )
-            # Replace reference with content
-            content = content.replace(f"(({ref}))", resolved_ref)
-    
-    return content
 
 
 def find_or_create_page(title: str) -> str:
@@ -583,18 +437,17 @@ def get_page_content(title: str, resolve_refs: bool = True) -> str:
     ]"""
     
     # Get all blocks on the page with their hierarchy information
-    query = """[:find ?uid ?string ?order ?parent-uid
-               :in $ % ?page-uid
-               :where
-               [?page :block/uid ?page-uid]
-               [?block :block/string ?string]
-               [?block :block/uid ?uid]
-               [?block :block/order ?order]
-               (ancestor ?block ?page)
-               [?parent :block/children ?block]
-               [?parent :block/uid ?parent-uid]]"""
+    query = f"""[:find ?uid ?string ?order ?parent-uid
+                :in $ % ?page-uid
+                :where
+                [?page :block/uid ?page-uid]
+                [?block :block/string ?string]
+                [?block :block/uid ?uid]
+                [?block :block/order ?order]
+                (ancestor ?block ?page)
+                [?parent :block/children ?block]
+                [?parent :block/uid ?parent-uid]]"""
     
-    # This was the issue - we need to pass the rule as part of inputs array
     blocks = execute_query(query, [ancestor_rule, page_uid])
     
     if not blocks:
@@ -649,17 +502,3 @@ def get_page_content(title: str, resolve_refs: bool = True) -> str:
     
     logger.debug(f"Retrieved page content for: {title}")
     return markdown
-
-
-def format_roam_date(date=None):
-    """Format a date in Roam's preferred format (e.g., "March 25th, 2025")."""
-    if date is None:
-        date = datetime.now()
-    
-    day = date.day
-    if 11 <= day <= 13:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
-    
-    return date.strftime(f"%B %-d{suffix}, %Y")

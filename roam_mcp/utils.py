@@ -1,8 +1,12 @@
 """Utility functions for the Roam MCP server."""
 
 import re
+import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set, Match, Tuple
+
+# Set up logging
+logger = logging.getLogger("roam-mcp.utils")
 
 # Date formatting
 def format_roam_date(date: Optional[datetime] = None) -> str:
@@ -181,22 +185,26 @@ def process_nested_content(content: List[Dict], parent_uid: str, session, header
         )
         
         if response.status_code != 200:
+            logger.error(f"Failed to create block: {response.text}")
             raise Exception(f"Failed to create block: {response.text}")
         
         # Get the UID of the newly created block
         new_block_uid = find_block_uid(session, headers, graph_name, block["text"])
-        created_uids.append(new_block_uid)
-        
-        # Process children if present
-        if block.get("children"):
-            child_uids = process_nested_content(
-                block["children"],
-                new_block_uid,
-                session, 
-                headers, 
-                graph_name
-            )
-            created_uids.extend(child_uids)
+        if new_block_uid:
+            created_uids.append(new_block_uid)
+            
+            # Process children if present
+            if block.get("children"):
+                child_uids = process_nested_content(
+                    block["children"],
+                    new_block_uid,
+                    session, 
+                    headers, 
+                    graph_name
+                )
+                created_uids.extend(child_uids)
+        else:
+            logger.warning(f"Could not find UID for newly created block: {block['text'][:50]}...")
     
     return created_uids
 
@@ -227,10 +235,43 @@ def find_block_uid(session, headers, graph_name: str, block_content: str) -> str
     )
     
     if search_response.status_code == 200 and search_response.json().get('result'):
-        block_uid = search_response.json()['result'][0][0][':block/uid']
-        return block_uid
+        try:
+            block_uid = search_response.json()['result'][0][0][':block/uid']
+            return block_uid
+        except (KeyError, IndexError):
+            logger.error("Unexpected response format when finding block UID")
+            raise Exception("Failed to find the block UID due to unexpected response format")
     else:
-        raise Exception("Failed to find the block UID.")
+        # Try a more relaxed search if we can't find an exact match
+        # This can happen if there are subtle whitespace or formatting differences
+        logger.debug(f"Exact block match not found, trying a more relaxed search")
+        try:
+            # Get a list of recent blocks sorted by creation time
+            time_query = f'''[:find ?uid ?string ?time
+                             :where [?b :block/string ?string]
+                                    [?b :block/uid ?uid]
+                                    [?b :create/time ?time]]
+                             :order :desc
+                             :limit 5'''
+            
+            time_response = session.post(
+                f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+                headers=headers,
+                json={"query": time_query}
+            )
+            
+            if time_response.status_code == 200 and time_response.json().get('result'):
+                # Check if any of these recent blocks match our content
+                clean_content = block_content.strip()
+                for uid, content, time in time_response.json()['result']:
+                    if content.strip() == clean_content:
+                        return uid
+            
+            logger.error("Could not find block UID with relaxed search")
+            raise Exception("Failed to find the block UID even with relaxed search")
+        except Exception as e:
+            logger.error(f"Error in relaxed block search: {str(e)}")
+            raise Exception(f"Failed to find the block UID: {str(e)}")
 
 
 def find_page_by_title(session, headers, graph_name: str, title: str) -> Optional[str]:
@@ -246,7 +287,10 @@ def find_page_by_title(session, headers, graph_name: str, title: str) -> Optiona
     Returns:
         Page UID or None if not found
     """
-    # Check exact match first
+    # Clean up the title
+    title = title.strip()
+    
+    # First try direct page lookup (more reliable than case-insensitive queries in Roam)
     query = f'''[:find ?uid .
                 :where [?e :node/title "{title}"]
                         [?e :block/uid ?uid]]'''
@@ -260,20 +304,36 @@ def find_page_by_title(session, headers, graph_name: str, title: str) -> Optiona
     if response.status_code == 200 and response.json().get('result'):
         return response.json()['result']
     
-    # Try case-insensitive match
-    query = f'''[:find ?title ?uid
-                :where [?e :node/title ?title]
-                        [?e :block/uid ?uid]]'''
+    # If not found, try checking if it's a UID
+    if len(title) == 9 and re.match(r'^[a-zA-Z0-9_-]{9}$', title):
+        # This looks like a UID, check if it's a valid page UID
+        uid_query = f'''[:find ?title .
+                        :where [?e :block/uid "{title}"]
+                                [?e :node/title ?title]]'''
+        
+        uid_response = session.post(
+            f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+            headers=headers,
+            json={"query": uid_query}
+        )
+        
+        if uid_response.status_code == 200 and uid_response.json().get('result'):
+            return title
     
-    response = session.post(
+    # If still not found, try case-insensitive match by getting all pages
+    all_pages_query = f'''[:find ?title ?uid
+                         :where [?e :node/title ?title]
+                                 [?e :block/uid ?uid]]'''
+    
+    all_pages_response = session.post(
         f'https://api.roamresearch.com/api/graph/{graph_name}/q',
         headers=headers,
-        json={"query": query}
+        json={"query": all_pages_query}
     )
     
-    if response.status_code == 200 and response.json().get('result'):
-        for result_title, uid in response.json()['result']:
-            if result_title.lower() == title.lower():
+    if all_pages_response.status_code == 200 and all_pages_response.json().get('result'):
+        for page_title, uid in all_pages_response.json()['result']:
+            if page_title.lower() == title.lower():
                 return uid
     
     return None
@@ -304,26 +364,31 @@ def resolve_block_references(session, headers, graph_name: str, content: str, ma
     if not refs:
         return content
     
-    # Get content for each referenced block
+    # For each reference, get its content
     for ref in refs:
-        query = f'''[:find ?string .
-                    :where [?b :block/uid "{ref}"]
-                            [?b :block/string ?string]]'''
-        
-        response = session.post(
-            f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-            headers=headers,
-            json={"query": query}
-        )
-        
-        if response.status_code == 200 and response.json().get('result'):
-            ref_content = response.json()['result']
-            # Recursively resolve references in the referenced content
-            resolved_ref = resolve_block_references(
-                session, headers, graph_name, 
-                ref_content, max_depth, current_depth + 1
+        try:
+            query = f'''[:find ?string .
+                        :where [?b :block/uid "{ref}"]
+                                [?b :block/string ?string]]'''
+            
+            response = session.post(
+                f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+                headers=headers,
+                json={"query": query}
             )
-            # Replace reference with content
-            content = content.replace(f"(({ref}))", resolved_ref)
+            
+            if response.status_code == 200 and response.json().get('result'):
+                ref_content = response.json()['result']
+                
+                # Recursively resolve nested references
+                resolved_ref = resolve_block_references(
+                    session, headers, graph_name, 
+                    ref_content, max_depth, current_depth + 1
+                )
+                
+                # Replace reference with content
+                content = content.replace(f"(({ref}))", resolved_ref)
+        except Exception as e:
+            logger.warning(f"Failed to resolve reference (({ref})): {str(e)}")
     
     return content

@@ -1,10 +1,9 @@
 """Search operations for the Roam MCP server."""
 
-import os
-import logging
 from typing import Dict, List, Any, Optional, Union, Set
 from datetime import datetime, timedelta
 import re
+import logging
 
 from roam_mcp.api import (
     execute_query,
@@ -44,66 +43,81 @@ def search_by_text(text: str, page_title_uid: Optional[str] = None, case_sensiti
     
     if page_title_uid:
         # Try to find the page UID if a title was provided
-        page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
-        
-        if not page_uid:
+        try:
+            page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
+            
+            if not page_uid:
+                return {
+                    "success": False,
+                    "matches": [],
+                    "message": f"Page '{page_title_uid}' not found"
+                }
+                
+            query = f"""[:find ?uid ?s ?order
+                      :where
+                      [?p :block/uid "{page_uid}"]
+                      [?b :block/page ?p]
+                      [?b :block/string ?s]
+                      [?b :block/uid ?uid]
+                      [?b :block/order ?order]
+                      [{text_condition}]]"""
+        except Exception as e:
+            logger.error(f"Error finding page '{page_title_uid}': {str(e)}")
             return {
                 "success": False,
                 "matches": [],
-                "message": f"Page '{page_title_uid}' not found"
+                "message": f"Error finding page: {str(e)}"
             }
-            
-        query = f"""[:find ?uid ?s
-                   :in $ ?page-uid
-                   :where
-                   [?p :block/uid ?page-uid]
-                   [?b :block/page ?p]
-                   [?b :block/string ?s]
-                   [?b :block/uid ?uid]
-                   [{text_condition}]]"""
-                   
-        results = execute_query(query, [page_uid])
-        
-        # Process results without page titles
-        matches = []
-        for uid, content in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title_uid
-            })
-            
     else:
         query = f"""[:find ?uid ?s ?page-title
-                   :where
-                   [?b :block/string ?s]
-                   [?b :block/uid ?uid]
-                   [?b :block/page ?p]
-                   [?p :node/title ?page-title]
-                   [{text_condition}]]"""
-                   
+                  :where
+                  [?b :block/string ?s]
+                  [?b :block/uid ?uid]
+                  [?b :block/page ?p]
+                  [?p :node/title ?page-title]
+                  [{text_condition}]]"""
+    
+    # Execute the query
+    try:
         results = execute_query(query)
         
-        # Process the results with page titles
+        # Process the results
         matches = []
-        for uid, content, page_title in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title
-            })
-    
-    return {
-        "success": True,
-        "matches": matches,
-        "message": f"Found {len(matches)} block(s) containing \"{text}\""
-    }
+        if page_title_uid:
+            # For page-specific search, results are [uid, content, order]
+            for uid, content, order in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title_uid
+                })
+        else:
+            # For global search, results are [uid, content, page_title]
+            for uid, content, page_title in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title
+                })
+        
+        return {
+            "success": True,
+            "matches": matches,
+            "message": f"Found {len(matches)} block(s) containing \"{text}\""
+        }
+    except Exception as e:
+        logger.error(f"Error searching by text: {str(e)}")
+        return {
+            "success": False,
+            "matches": [],
+            "message": f"Error searching by text: {str(e)}"
+        }
 
 
 def search_by_tag(tag: str, page_title_uid: Optional[str] = None, near_tag: Optional[str] = None) -> Dict[str, Any]:
@@ -147,72 +161,79 @@ def search_by_tag(tag: str, page_title_uid: Optional[str] = None, near_tag: Opti
         combined_condition = tag_condition
     
     # Build query based on whether we're searching in a specific page
-    if page_title_uid:
-        # Try to find the page UID if a title was provided
-        page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
-        
-        if not page_uid:
-            return {
-                "success": False,
-                "matches": [],
-                "message": f"Page '{page_title_uid}' not found"
-            }
+    try:
+        if page_title_uid:
+            # Try to find the page UID if a title was provided
+            page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
             
-        query = f"""[:find ?uid ?s
-                   :in $ ?page-uid
-                   :where
-                   [?p :block/uid ?page-uid]
-                   [?b :block/page ?p]
-                   [?b :block/string ?s]
-                   [?b :block/uid ?uid]
-                   [{combined_condition}]]"""
-                   
-        results = execute_query(query, [page_uid])
+            if not page_uid:
+                return {
+                    "success": False,
+                    "matches": [],
+                    "message": f"Page '{page_title_uid}' not found"
+                }
+                
+            query = f"""[:find ?uid ?s
+                      :where
+                      [?p :block/uid "{page_uid}"]
+                      [?b :block/page ?p]
+                      [?b :block/string ?s]
+                      [?b :block/uid ?uid]
+                      [{combined_condition}]]"""
+        else:
+            query = f"""[:find ?uid ?s ?page-title
+                      :where
+                      [?b :block/string ?s]
+                      [?b :block/uid ?uid]
+                      [?b :block/page ?p]
+                      [?p :node/title ?page-title]
+                      [{combined_condition}]]"""
         
-        # Process results without page titles
-        matches = []
-        for uid, content in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title_uid
-            })
-    else:
-        query = f"""[:find ?uid ?s ?page-title
-                   :where
-                   [?b :block/string ?s]
-                   [?b :block/uid ?uid]
-                   [?b :block/page ?p]
-                   [?p :node/title ?page-title]
-                   [{combined_condition}]]"""
-                   
+        # Execute the query
         results = execute_query(query)
         
-        # Process the results with page titles
+        # Process the results
         matches = []
-        for uid, content, page_title in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title
-            })
-    
-    # Build message
-    message = f"Found {len(matches)} block(s) with tag #{clean_tag}"
-    if near_tag:
-        message += f" near #{clean_near_tag}"
-    
-    return {
-        "success": True,
-        "matches": matches,
-        "message": message
-    }
+        if page_title_uid:
+            # For page-specific search, results are [uid, content]
+            for uid, content in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title_uid
+                })
+        else:
+            # For global search, results are [uid, content, page_title]
+            for uid, content, page_title in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title
+                })
+        
+        # Build message
+        message = f"Found {len(matches)} block(s) with tag #{clean_tag}"
+        if near_tag:
+            message += f" near #{clean_near_tag}"
+        
+        return {
+            "success": True,
+            "matches": matches,
+            "message": message
+        }
+    except Exception as e:
+        logger.error(f"Error searching by tag: {str(e)}")
+        return {
+            "success": False,
+            "matches": [],
+            "message": f"Error searching by tag: {str(e)}"
+        }
 
 
 def search_by_status(status: str, page_title_uid: Optional[str] = None, include: Optional[str] = None, exclude: Optional[str] = None) -> Dict[str, Any]:
@@ -240,97 +261,104 @@ def search_by_status(status: str, page_title_uid: Optional[str] = None, include:
     # Status pattern
     status_pattern = f"{{{{[[{status}]]}}}}"
     
-    # Build query based on whether we're searching in a specific page
-    if page_title_uid:
-        # Try to find the page UID if a title was provided
-        page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
+    try:
+        # Build query based on whether we're searching in a specific page
+        if page_title_uid:
+            # Try to find the page UID if a title was provided
+            page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
+            
+            if not page_uid:
+                return {
+                    "success": False,
+                    "matches": [],
+                    "message": f"Page '{page_title_uid}' not found"
+                }
+                
+            query = f"""[:find ?uid ?s
+                      :where
+                      [?p :block/uid "{page_uid}"]
+                      [?b :block/page ?p]
+                      [?b :block/string ?s]
+                      [?b :block/uid ?uid]
+                      [(clojure.string/includes? ?s "{status_pattern}")]]"""
+        else:
+            query = f"""[:find ?uid ?s ?page-title
+                      :where
+                      [?b :block/string ?s]
+                      [?b :block/uid ?uid]
+                      [?b :block/page ?p]
+                      [?p :node/title ?page-title]
+                      [(clojure.string/includes? ?s "{status_pattern}")]]"""
         
-        if not page_uid:
-            return {
-                "success": False,
-                "matches": [],
-                "message": f"Page '{page_title_uid}' not found"
-            }
-            
-        query = f"""[:find ?uid ?s
-                   :in $ ?page-uid
-                   :where
-                   [?p :block/uid ?page-uid]
-                   [?b :block/page ?p]
-                   [?b :block/string ?s]
-                   [?b :block/uid ?uid]
-                   [(clojure.string/includes? ?s "{status_pattern}")]]"""
-                   
-        results = execute_query(query, [page_uid])
-        
-        # Process results without page titles
-        matches = []
-        for uid, content in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            # Apply include/exclude filters
-            if include:
-                include_terms = [term.strip().lower() for term in include.split(',')]
-                if not any(term in resolved_content.lower() for term in include_terms):
-                    continue
-                    
-            if exclude:
-                exclude_terms = [term.strip().lower() for term in exclude.split(',')]
-                if any(term in resolved_content.lower() for term in exclude_terms):
-                    continue
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title_uid
-            })
-    else:
-        query = f"""[:find ?uid ?s ?page-title
-                   :where
-                   [?b :block/string ?s]
-                   [?b :block/uid ?uid]
-                   [?b :block/page ?p]
-                   [?p :node/title ?page-title]
-                   [(clojure.string/includes? ?s "{status_pattern}")]]"""
-                   
+        # Execute the query
         results = execute_query(query)
         
-        # Process the results with page titles
+        # Process the results
         matches = []
-        for uid, content, page_title in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            # Apply include/exclude filters
-            if include:
-                include_terms = [term.strip().lower() for term in include.split(',')]
-                if not any(term in resolved_content.lower() for term in include_terms):
-                    continue
-                    
-            if exclude:
-                exclude_terms = [term.strip().lower() for term in exclude.split(',')]
-                if any(term in resolved_content.lower() for term in exclude_terms):
-                    continue
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title
-            })
-    
-    # Build message
-    message = f"Found {len(matches)} block(s) with status {status}"
-    if include:
-        message += f" including '{include}'"
-    if exclude:
-        message += f" excluding '{exclude}'"
-    
-    return {
-        "success": True,
-        "matches": matches,
-        "message": message
-    }
+        if page_title_uid:
+            # For page-specific search, results are [uid, content]
+            for uid, content in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                # Apply include/exclude filters
+                if include:
+                    include_terms = [term.strip().lower() for term in include.split(',')]
+                    if not any(term in resolved_content.lower() for term in include_terms):
+                        continue
+                        
+                if exclude:
+                    exclude_terms = [term.strip().lower() for term in exclude.split(',')]
+                    if any(term in resolved_content.lower() for term in exclude_terms):
+                        continue
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title_uid
+                })
+        else:
+            # For global search, results are [uid, content, page_title]
+            for uid, content, page_title in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                # Apply include/exclude filters
+                if include:
+                    include_terms = [term.strip().lower() for term in include.split(',')]
+                    if not any(term in resolved_content.lower() for term in include_terms):
+                        continue
+                        
+                if exclude:
+                    exclude_terms = [term.strip().lower() for term in exclude.split(',')]
+                    if any(term in resolved_content.lower() for term in exclude_terms):
+                        continue
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title
+                })
+        
+        # Build message
+        message = f"Found {len(matches)} block(s) with status {status}"
+        if include:
+            message += f" including '{include}'"
+        if exclude:
+            message += f" excluding '{exclude}'"
+        
+        return {
+            "success": True,
+            "matches": matches,
+            "message": message
+        }
+    except Exception as e:
+        logger.error(f"Error searching by status: {str(e)}")
+        return {
+            "success": False,
+            "matches": [],
+            "message": f"Error searching by status: {str(e)}"
+        }
 
 
 def search_block_refs(block_uid: Optional[str] = None, page_title_uid: Optional[str] = None) -> Dict[str, Any]:
@@ -348,93 +376,99 @@ def search_block_refs(block_uid: Optional[str] = None, page_title_uid: Optional[
     
     # Determine what kind of search we're doing
     if block_uid:
-        block_ref_pattern = f"\\(\\({block_uid}\\)\\)"
+        block_ref_pattern = f"(({block_uid}))"
         description = f"referencing block (({block_uid}))"
     else:
+        block_ref_pattern = "\\(\\([^)]+\\)\\)"
         description = "containing block references"
     
-    # Build query based on whether we're searching in a specific page
-    if page_title_uid:
-        # Try to find the page UID if a title was provided
-        page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
-        
-        if not page_uid:
-            return {
-                "success": False,
-                "matches": [],
-                "message": f"Page '{page_title_uid}' not found"
-            }
+    try:
+        # Build query based on whether we're searching in a specific page
+        if page_title_uid:
+            # Try to find the page UID if a title was provided
+            page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
             
-        if block_uid:
-            query = f"""[:find ?uid ?s
-                      :in $ ?page-uid
-                      :where
-                      [?p :block/uid ?page-uid]
-                      [?b :block/page ?p]
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [(clojure.string/includes? ?s "{block_ref_pattern}")]]"""
-            results = execute_query(query, [page_uid])
+            if not page_uid:
+                return {
+                    "success": False,
+                    "matches": [],
+                    "message": f"Page '{page_title_uid}' not found"
+                }
+                
+            if block_uid:
+                query = f"""[:find ?uid ?s
+                          :where
+                          [?p :block/uid "{page_uid}"]
+                          [?b :block/page ?p]
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [(clojure.string/includes? ?s "{block_ref_pattern}")]]"""
+            else:
+                query = f"""[:find ?uid ?s
+                          :where
+                          [?p :block/uid "{page_uid}"]
+                          [?b :block/page ?p]
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [(re-find #"\\(\\([^)]+\\)\\)" ?s)]]"""
         else:
-            query = f"""[:find ?uid ?s
-                      :in $ ?page-uid
-                      :where
-                      [?p :block/uid ?page-uid]
-                      [?b :block/page ?p]
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [(re-find #"\\(\\([^)]+\\)\\)" ?s)]]"""
-            results = execute_query(query, [page_uid])
+            if block_uid:
+                query = f"""[:find ?uid ?s ?page-title
+                          :where
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :block/page ?p]
+                          [?p :node/title ?page-title]
+                          [(clojure.string/includes? ?s "{block_ref_pattern}")]]"""
+            else:
+                query = f"""[:find ?uid ?s ?page-title
+                          :where
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :block/page ?p]
+                          [?p :node/title ?page-title]
+                          [(re-find #"\\(\\([^)]+\\)\\)" ?s)]]"""
         
-        # Process results without page titles
+        # Execute the query
+        results = execute_query(query)
+        
+        # Process the results
         matches = []
-        for uid, content in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title_uid
-            })
-    else:
-        if block_uid:
-            query = f"""[:find ?uid ?s ?page-title
-                      :in $
-                      :where
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [?p :node/title ?page-title]
-                      [(clojure.string/includes? ?s "{block_ref_pattern}")]]"""
-            results = execute_query(query)
+        if page_title_uid:
+            # For page-specific search, results are [uid, content]
+            for uid, content in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title_uid
+                })
         else:
-            query = f"""[:find ?uid ?s ?page-title
-                      :where
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [?p :node/title ?page-title]
-                      [(re-find #"\\(\\([^)]+\\)\\)" ?s)]]"""
-            results = execute_query(query)
+            # For global search, results are [uid, content, page_title]
+            for uid, content, page_title in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "page_title": page_title
+                })
         
-        # Process the results with page titles
-        matches = []
-        for uid, content, page_title in results:
-            # Resolve references if present
-            resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-            
-            matches.append({
-                "block_uid": uid,
-                "content": resolved_content,
-                "page_title": page_title
-            })
-    
-    return {
-        "success": True,
-        "matches": matches,
-        "message": f"Found {len(matches)} block(s) {description}"
-    }
+        return {
+            "success": True,
+            "matches": matches,
+            "message": f"Found {len(matches)} block(s) {description}"
+        }
+    except Exception as e:
+        logger.error(f"Error searching block references: {str(e)}")
+        return {
+            "success": False,
+            "matches": [],
+            "message": f"Error searching block references: {str(e)}"
+        }
 
 
 def search_hierarchy(parent_uid: Optional[str] = None, child_uid: Optional[str] = None, 
@@ -462,132 +496,136 @@ def search_hierarchy(parent_uid: Optional[str] = None, child_uid: Optional[str] 
     
     # Define ancestor rule
     ancestor_rule = """[
-        [(ancestor ?child ?parent)
-            [?parent :block/children ?child]]
-        [(ancestor ?child ?parent)
-            [?p :block/children ?child]
-            (ancestor ?p ?parent)]
+        [(ancestor ?child ?parent ?depth)
+            [?parent :block/children ?child]
+            [(identity 1) ?depth]]
+        [(ancestor ?child ?parent ?depth)
+            [?mid :block/children ?child]
+            (ancestor ?mid ?parent ?prev-depth)
+            [(+ ?prev-depth 1) ?depth]]
     ]"""
     
-    # Determine search type and build query
-    if parent_uid:
-        # Searching for children
-        if page_title_uid:
-            # Try to find the page UID if a title was provided
-            page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
-            
-            if not page_uid:
-                return {
-                    "success": False,
-                    "matches": [],
-                    "message": f"Page '{page_title_uid}' not found"
-                }
+    try:
+        # Determine search type and build query
+        if parent_uid:
+            # Searching for children
+            if page_title_uid:
+                # Try to find the page UID if a title was provided
+                page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
                 
-            query = """[:find ?uid ?s ?depth
-                      :in $ % ?parent-uid ?page-uid ?max-depth
-                      :where
-                      [?parent :block/uid ?parent-uid]
-                      [?p :block/uid ?page-uid]
-                      (ancestor ?b ?parent)
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [(get-else $ ?b :block/path-length 1) ?depth]
-                      [(< ?depth ?max-depth)]]"""
-            inputs = [ancestor_rule, parent_uid, page_uid, max_depth + 1]
-        else:
-            query = """[:find ?uid ?s ?page-title ?depth
-                      :in $ % ?parent-uid ?max-depth
-                      :where
-                      [?parent :block/uid ?parent-uid]
-                      (ancestor ?b ?parent)
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [?p :node/title ?page-title]
-                      [(get-else $ ?b :block/path-length 1) ?depth]
-                      [(< ?depth ?max-depth)]]"""
-            inputs = [ancestor_rule, parent_uid, max_depth + 1]
-        
-        description = f"descendants of block {parent_uid}"
-    else:
-        # Searching for parents
-        if page_title_uid:
-            # Try to find the page UID if a title was provided
-            page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
+                if not page_uid:
+                    return {
+                        "success": False,
+                        "matches": [],
+                        "message": f"Page '{page_title_uid}' not found"
+                    }
+                    
+                query = f"""[:find ?uid ?s ?depth
+                          :in $ % ?parent-uid ?max-depth
+                          :where
+                          [?parent :block/uid ?parent-uid]
+                          [?p :block/uid "{page_uid}"]
+                          (ancestor ?b ?parent ?depth)
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :block/page ?p]
+                          [(<= ?depth ?max-depth)]]"""
+                inputs = [ancestor_rule, parent_uid, max_depth]
+            else:
+                query = f"""[:find ?uid ?s ?page-title ?depth
+                          :in $ % ?parent-uid ?max-depth
+                          :where
+                          [?parent :block/uid ?parent-uid]
+                          (ancestor ?b ?parent ?depth)
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :block/page ?p]
+                          [?p :node/title ?page-title]
+                          [(<= ?depth ?max-depth)]]"""
+                inputs = [ancestor_rule, parent_uid, max_depth]
             
-            if not page_uid:
-                return {
-                    "success": False,
-                    "matches": [],
-                    "message": f"Page '{page_title_uid}' not found"
-                }
+            description = f"descendants of block {parent_uid}"
+        else:
+            # Searching for parents
+            if page_title_uid:
+                # Try to find the page UID if a title was provided
+                page_uid = find_page_by_title(session, headers, GRAPH_NAME, page_title_uid)
                 
-            query = """[:find ?uid ?s ?depth
-                      :in $ % ?child-uid ?page-uid ?max-depth
-                      :where
-                      [?child :block/uid ?child-uid]
-                      [?p :block/uid ?page-uid]
-                      (ancestor ?child ?b)
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [(get-else $ ?b :block/path-length 1) ?depth]
-                      [(< ?depth ?max-depth)]]"""
-            inputs = [ancestor_rule, child_uid, page_uid, max_depth + 1]
+                if not page_uid:
+                    return {
+                        "success": False,
+                        "matches": [],
+                        "message": f"Page '{page_title_uid}' not found"
+                    }
+                    
+                query = f"""[:find ?uid ?s ?depth
+                          :in $ % ?child-uid ?max-depth
+                          :where
+                          [?child :block/uid ?child-uid]
+                          [?p :block/uid "{page_uid}"]
+                          (ancestor ?child ?b ?depth)
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :block/page ?p]
+                          [(<= ?depth ?max-depth)]]"""
+                inputs = [ancestor_rule, child_uid, max_depth]
+            else:
+                query = f"""[:find ?uid ?s ?page-title ?depth
+                          :in $ % ?child-uid ?max-depth
+                          :where
+                          [?child :block/uid ?child-uid]
+                          (ancestor ?child ?b ?depth)
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :block/page ?p]
+                          [?p :node/title ?page-title]
+                          [(<= ?depth ?max-depth)]]"""
+                inputs = [ancestor_rule, child_uid, max_depth]
+            
+            description = f"ancestors of block {child_uid}"
+        
+        # Execute the query
+        results = execute_query(query, inputs)
+        
+        # Process the results
+        matches = []
+        if page_title_uid:
+            # For page-specific search, results are [uid, content, depth]
+            for uid, content, depth in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "depth": depth,
+                    "page_title": page_title_uid
+                })
         else:
-            query = """[:find ?uid ?s ?page-title ?depth
-                      :in $ % ?child-uid ?max-depth
-                      :where
-                      [?child :block/uid ?child-uid]
-                      (ancestor ?child ?b)
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [?p :node/title ?page-title]
-                      [(get-else $ ?b :block/path-length 1) ?depth]
-                      [(< ?depth ?max-depth)]]"""
-            inputs = [ancestor_rule, child_uid, max_depth + 1]
+            # For global search, results are [uid, content, page_title, depth]
+            for uid, content, page_title, depth in results:
+                # Resolve references if present
+                resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                matches.append({
+                    "block_uid": uid,
+                    "content": resolved_content,
+                    "depth": depth,
+                    "page_title": page_title
+                })
         
-        description = f"ancestors of block {child_uid}"
-    
-    # Execute the query
-    results = execute_query(query, inputs)
-    
-    # Process the results
-    matches = []
-    for result in results:
-        uid = result[0]
-        content = result[1]
-        
-        if len(result) == 3:
-            # Format is [uid, content, depth]
-            page_title = page_title_uid
-            depth = result[2]
-        else:
-            # Format is [uid, content, page_title, depth]
-            page_title = result[2]
-            depth = result[3]
-        
-        # Resolve references if present
-        resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
-        
-        match_data = {
-            "block_uid": uid,
-            "content": resolved_content,
-            "depth": depth
+        return {
+            "success": True,
+            "matches": matches,
+            "message": f"Found {len(matches)} block(s) as {description}"
         }
-        
-        if page_title:
-            match_data["page_title"] = page_title
-            
-        matches.append(match_data)
-    
-    return {
-        "success": True,
-        "matches": matches,
-        "message": f"Found {len(matches)} block(s) as {description}"
-    }
+    except Exception as e:
+        logger.error(f"Error searching hierarchy: {str(e)}")
+        return {
+            "success": False,
+            "matches": [],
+            "message": f"Error searching hierarchy: {str(e)}"
+        }
 
 
 def search_by_date(start_date: str, end_date: Optional[str] = None, 
@@ -642,261 +680,177 @@ def search_by_date(start_date: str, end_date: Optional[str] = None,
     
     session, headers = get_session_and_headers()
     
-    # Build queries based on scope and type
-    results = []
-    
-    # Fix for the "Insufficient bindings" error by properly handling create/edit time variables
-    if scope in ["blocks", "both"]:
-        # Blocks scoped query
-        if type_filter == "created":
-            query = f"""[:find ?uid ?s ?page-title ?time
-                      :where
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [?p :node/title ?page-title]
-                      [?b :create/time ?time]
-                      [(>= ?time {start_timestamp})]
-                      [(<= ?time {end_timestamp})]]"""
-        elif type_filter == "modified":
-            query = f"""[:find ?uid ?s ?page-title ?time
-                      :where
-                      [?b :block/string ?s]
-                      [?b :block/uid ?uid]
-                      [?b :block/page ?p]
-                      [?p :node/title ?page-title]
-                      [?b :edit/time ?time]
-                      [(>= ?time {start_timestamp})]
-                      [(<= ?time {end_timestamp})]]"""
-        else:  # both
-            # We need two separate queries for created and modified times
-            create_query = f"""[:find ?uid ?s ?page-title ?time
-                            :where
-                            [?b :block/string ?s]
-                            [?b :block/uid ?uid]
-                            [?b :block/page ?p]
-                            [?p :node/title ?page-title]
-                            [?b :create/time ?time]
-                            [(>= ?time {start_timestamp})]
-                            [(<= ?time {end_timestamp})]]"""
-                            
-            edit_query = f"""[:find ?uid ?s ?page-title ?time
-                           :where
-                           [?b :block/string ?s]
-                           [?b :block/uid ?uid]
-                           [?b :block/page ?p]
-                           [?p :node/title ?page-title]
-                           [?b :edit/time ?time]
-                           [(>= ?time {start_timestamp})]
-                           [(<= ?time {end_timestamp})]]"""
-            
-            # Execute both queries and combine results
-            create_results = execute_query(create_query)
-            edit_results = execute_query(edit_query)
-            
-            # Process created time results
-            for uid, content, page_title, time in create_results:
-                results.append({
-                    "uid": uid,
-                    "type": "block",
-                    "content": resolve_block_references(session, headers, GRAPH_NAME, content) if include_content else None,
-                    "page_title": page_title,
-                    "time": time,
-                    "time_type": "created"
-                })
-            
-            # Process edit time results, avoiding duplicates
-            seen_uids = set(r["uid"] for r in results)
-            for uid, content, page_title, time in edit_results:
-                if uid not in seen_uids:
-                    results.append({
+    try:
+        # Build queries based on scope and type
+        matches = []
+        
+        if scope in ["blocks", "both"]:
+            # Block query for creation date
+            if type_filter in ["created", "both"]:
+                query = f"""[:find ?uid ?s ?page-title ?time
+                        :where
+                        [?b :block/string ?s]
+                        [?b :block/uid ?uid]
+                        [?b :block/page ?p]
+                        [?p :node/title ?page-title]
+                        [?b :create/time ?time]
+                        [(>= ?time {start_timestamp})]
+                        [(<= ?time {end_timestamp})]]"""
+                
+                block_created_results = execute_query(query)
+                
+                for uid, content, page_title, time in block_created_results:
+                    # Add to matches
+                    match_data = {
                         "uid": uid,
                         "type": "block",
-                        "content": resolve_block_references(session, headers, GRAPH_NAME, content) if include_content else None,
-                        "page_title": page_title,
                         "time": time,
-                        "time_type": "modified"
-                    })
-                    seen_uids.add(uid)
-            
-            # Skip the standard query for "both" since we've handled it separately
-            query = None
-        
-        # Execute the query if not "both"
-        if query:
-            query_results = execute_query(query)
-            
-            # Process results
-            for uid, content, page_title, time in query_results:
-                results.append({
-                    "uid": uid,
-                    "type": "block",
-                    "content": resolve_block_references(session, headers, GRAPH_NAME, content) if include_content else None,
-                    "page_title": page_title,
-                    "time": time,
-                    "time_type": type_filter
-                })
-    
-    if scope in ["pages", "both"]:
-        # Pages scoped query
-        if type_filter == "created":
-            query = f"""[:find ?uid ?title ?time
-                      :where
-                      [?p :node/title ?title]
-                      [?p :block/uid ?uid]
-                      [?p :create/time ?time]
-                      [(>= ?time {start_timestamp})]
-                      [(<= ?time {end_timestamp})]]"""
-        elif type_filter == "modified":
-            query = f"""[:find ?uid ?title ?time
-                      :where
-                      [?p :node/title ?title]
-                      [?p :block/uid ?uid]
-                      [?p :edit/time ?time]
-                      [(>= ?time {start_timestamp})]
-                      [(<= ?time {end_timestamp})]]"""
-        else:  # both
-            # We need two separate queries for created and modified times
-            create_query = f"""[:find ?uid ?title ?time
-                            :where
-                            [?p :node/title ?title]
-                            [?p :block/uid ?uid]
-                            [?p :create/time ?time]
-                            [(>= ?time {start_timestamp})]
-                            [(<= ?time {end_timestamp})]]"""
-                            
-            edit_query = f"""[:find ?uid ?title ?time
-                           :where
-                           [?p :node/title ?title]
-                           [?p :block/uid ?uid]
-                           [?p :edit/time ?time]
-                           [(>= ?time {start_timestamp})]
-                           [(<= ?time {end_timestamp})]]"""
-            
-            # Execute both queries and combine results
-            create_results = execute_query(create_query)
-            edit_results = execute_query(edit_query)
-            
-            # Process created time results
-            for uid, title, time in create_results:
-                # Only get page content if requested
-                page_content = None
-                if include_content:
-                    try:
-                        # Get a sample of page content (first 3 blocks)
-                        content_query = f"""[:find (pull ?b [:block/string])
-                                         :where
-                                         [?p :block/uid "{uid}"]
-                                         [?b :block/page ?p]
-                                         [?b :block/order ?o]
-                                         [(< ?o 3)]]"""
-                        
-                        page_blocks = execute_query(content_query)
-                        if page_blocks:
-                            block_contents = [b[0].get(":block/string", "") for b in page_blocks[:3]]
-                            page_content = f"{title}\n" + "\n".join(block_contents)
-                            if len(page_blocks) > 3:
-                                page_content += "\n..."
-                        else:
-                            page_content = f"{title}\n(No content)"
-                    except Exception as e:
-                        page_content = f"{title}\n(Error retrieving content: {str(e)})"
-                
-                results.append({
-                    "uid": uid,
-                    "type": "page",
-                    "title": title,
-                    "content": page_content,
-                    "time": time,
-                    "time_type": "created"
-                })
-            
-            # Process edit time results, avoiding duplicates
-            seen_uids = set(r["uid"] for r in results)
-            for uid, title, time in edit_results:
-                if uid not in seen_uids:
-                    # Only get page content if requested
-                    page_content = None
-                    if include_content:
-                        try:
-                            # Get a sample of page content (first 3 blocks)
-                            content_query = f"""[:find (pull ?b [:block/string])
-                                             :where
-                                             [?p :block/uid "{uid}"]
-                                             [?b :block/page ?p]
-                                             [?b :block/order ?o]
-                                             [(< ?o 3)]]"""
-                            
-                            page_blocks = execute_query(content_query)
-                            if page_blocks:
-                                block_contents = [b[0].get(":block/string", "") for b in page_blocks[:3]]
-                                page_content = f"{title}\n" + "\n".join(block_contents)
-                                if len(page_blocks) > 3:
-                                    page_content += "\n..."
-                            else:
-                                page_content = f"{title}\n(No content)"
-                        except Exception as e:
-                            page_content = f"{title}\n(Error retrieving content: {str(e)})"
+                        "time_type": "created",
+                        "page_title": page_title
+                    }
                     
-                    results.append({
+                    if include_content:
+                        # Resolve references if present
+                        resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                        match_data["content"] = resolved_content
+                    
+                    matches.append(match_data)
+            
+            # Block query for modification date
+            if type_filter in ["modified", "both"]:
+                query = f"""[:find ?uid ?s ?page-title ?time
+                        :where
+                        [?b :block/string ?s]
+                        [?b :block/uid ?uid]
+                        [?b :block/page ?p]
+                        [?p :node/title ?page-title]
+                        [?b :edit/time ?time]
+                        [(>= ?time {start_timestamp})]
+                        [(<= ?time {end_timestamp})]]"""
+                
+                block_modified_results = execute_query(query)
+                
+                for uid, content, page_title, time in block_modified_results:
+                    # Add to matches
+                    match_data = {
+                        "uid": uid,
+                        "type": "block",
+                        "time": time,
+                        "time_type": "modified",
+                        "page_title": page_title
+                    }
+                    
+                    if include_content:
+                        # Resolve references if present
+                        resolved_content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                        match_data["content"] = resolved_content
+                    
+                    matches.append(match_data)
+        
+        if scope in ["pages", "both"]:
+            # Page query for creation date
+            if type_filter in ["created", "both"]:
+                query = f"""[:find ?uid ?title ?time
+                        :where
+                        [?p :node/title ?title]
+                        [?p :block/uid ?uid]
+                        [?p :create/time ?time]
+                        [(>= ?time {start_timestamp})]
+                        [(<= ?time {end_timestamp})]]"""
+                
+                page_created_results = execute_query(query)
+                
+                for uid, title, time in page_created_results:
+                    # Add to matches
+                    match_data = {
                         "uid": uid,
                         "type": "page",
-                        "title": title,
-                        "content": page_content,
                         "time": time,
-                        "time_type": "modified"
-                    })
-                    seen_uids.add(uid)
-            
-            # Skip the standard query for "both" since we've handled it separately
-            query = None
-        
-        # Execute the query if not "both"
-        if query:
-            query_results = execute_query(query)
-            
-            # Process results
-            for uid, title, time in query_results:
-                # Only get page content if requested
-                page_content = None
-                if include_content:
-                    try:
-                        # Get a sample of page content (first 3 blocks)
-                        content_query = f"""[:find (pull ?b [:block/string])
-                                         :where
-                                         [?p :block/uid "{uid}"]
-                                         [?b :block/page ?p]
-                                         [?b :block/order ?o]
-                                         [(< ?o 3)]]"""
+                        "time_type": "created",
+                        "title": title
+                    }
+                    
+                    if include_content:
+                        # Get a sample of page content
+                        sample_query = f"""[:find ?s
+                                        :where
+                                        [?p :block/uid "{uid}"]
+                                        [?b :block/page ?p]
+                                        [?b :block/string ?s]
+                                        [?b :block/order ?o]
+                                        [(< ?o 3)]]"""
                         
-                        page_blocks = execute_query(content_query)
+                        page_blocks = execute_query(sample_query)
+                        page_sample = "\n".join([content[0] for content in page_blocks[:3]])
+                        
                         if page_blocks:
-                            block_contents = [b[0].get(":block/string", "") for b in page_blocks[:3]]
-                            page_content = f"{title}\n" + "\n".join(block_contents)
+                            match_data["content"] = f"# {title}\n{page_sample}"
                             if len(page_blocks) > 3:
-                                page_content += "\n..."
+                                match_data["content"] += "\n..."
                         else:
-                            page_content = f"{title}\n(No content)"
-                    except Exception as e:
-                        page_content = f"{title}\n(Error retrieving content: {str(e)})"
+                            match_data["content"] = f"# {title}\n(No content)"
+                    
+                    matches.append(match_data)
+            
+            # Page query for modification date
+            if type_filter in ["modified", "both"]:
+                query = f"""[:find ?uid ?title ?time
+                        :where
+                        [?p :node/title ?title]
+                        [?p :block/uid ?uid]
+                        [?p :edit/time ?time]
+                        [(>= ?time {start_timestamp})]
+                        [(<= ?time {end_timestamp})]]"""
                 
-                results.append({
-                    "uid": uid,
-                    "type": "page",
-                    "title": title,
-                    "content": page_content,
-                    "time": time,
-                    "time_type": type_filter
-                })
-    
-    # Sort by time
-    results.sort(key=lambda x: x["time"], reverse=True)
-    
-    return {
-        "success": True,
-        "matches": results,
-        "message": f"Found {len(results)} matches for the given date range and criteria"
-    }
+                page_modified_results = execute_query(query)
+                
+                for uid, title, time in page_modified_results:
+                    # Add to matches
+                    match_data = {
+                        "uid": uid,
+                        "type": "page",
+                        "time": time,
+                        "time_type": "modified",
+                        "title": title
+                    }
+                    
+                    if include_content:
+                        # Get a sample of page content
+                        sample_query = f"""[:find ?s
+                                        :where
+                                        [?p :block/uid "{uid}"]
+                                        [?b :block/page ?p]
+                                        [?b :block/string ?s]
+                                        [?b :block/order ?o]
+                                        [(< ?o 3)]]"""
+                        
+                        page_blocks = execute_query(sample_query)
+                        page_sample = "\n".join([content[0] for content in page_blocks[:3]])
+                        
+                        if page_blocks:
+                            match_data["content"] = f"# {title}\n{page_sample}"
+                            if len(page_blocks) > 3:
+                                match_data["content"] += "\n..."
+                        else:
+                            match_data["content"] = f"# {title}\n(No content)"
+                    
+                    matches.append(match_data)
+        
+        # Sort by time
+        matches.sort(key=lambda x: x["time"], reverse=True)
+        
+        return {
+            "success": True,
+            "matches": matches,
+            "message": f"Found {len(matches)} matches for the given date range and criteria"
+        }
+    except Exception as e:
+        logger.error(f"Error searching by date: {str(e)}")
+        return {
+            "success": False,
+            "matches": [],
+            "message": f"Error searching by date: {str(e)}"
+        }
 
 
 def find_pages_modified_today(max_num_pages: int = 50) -> Dict[str, Any]:
@@ -922,25 +876,33 @@ def find_pages_modified_today(max_num_pages: int = 50) -> Dict[str, Any]:
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     start_timestamp = int(today.timestamp() * 1000)
     
-    # Query for pages modified today
-    query = """[:find ?title
-               :in $ ?start_timestamp %
-               :where
-               [?page :node/title ?title]
-               (ancestor ?block ?page)
-               [?block :edit/time ?time]
-               [(> ?time ?start_timestamp)]]"""
-    
-    results = execute_query(query, [start_timestamp, ancestor_rule])
-    
-    # Extract unique page titles
-    unique_pages = list(set([title[0] for title in results]))[:max_num_pages]
-    
-    return {
-        "success": True,
-        "pages": unique_pages,
-        "message": f"Found {len(unique_pages)} page(s) modified today"
-    }
+    try:
+        # Query for pages modified today
+        query = f"""[:find ?title
+                    :in $ ?start_timestamp %
+                    :where
+                    [?page :node/title ?title]
+                    (ancestor ?block ?page)
+                    [?block :edit/time ?time]
+                    [(> ?time ?start_timestamp)]]"""
+        
+        results = execute_query(query, [start_timestamp, ancestor_rule])
+        
+        # Extract unique page titles
+        unique_pages = list(set([title[0] for title in results]))[:max_num_pages]
+        
+        return {
+            "success": True,
+            "pages": unique_pages,
+            "message": f"Found {len(unique_pages)} page(s) modified today"
+        }
+    except Exception as e:
+        logger.error(f"Error finding pages modified today: {str(e)}")
+        return {
+            "success": False,
+            "pages": [],
+            "message": f"Error finding pages modified today: {str(e)}"
+        }
 
 
 def execute_datomic_query(query: str, inputs: Optional[List[Any]] = None) -> Dict[str, Any]:
@@ -963,6 +925,7 @@ def execute_datomic_query(query: str, inputs: Optional[List[Any]] = None) -> Dic
             "message": f"Query executed successfully. Found {len(results)} results."
         }
     except Exception as e:
+        logger.error(f"Error executing datomic query: {str(e)}")
         return {
             "success": False,
             "matches": [],
