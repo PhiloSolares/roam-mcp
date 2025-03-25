@@ -587,7 +587,7 @@ def add_todos(todos: List[str]) -> Dict[str, Any]:
         actions = []
         for i, todo in enumerate(todos):
             # Format with TODO syntax
-            todo_content = f"{{{{[[TODO]]}}}}} {todo}"
+            todo_content = f"{{{{[[TODO]]}}}} {todo}"
             
             # Create action
             action = create_block_action(
