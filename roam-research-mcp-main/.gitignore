@@ -1,0 +1,9 @@
+node_modules/
+build/
+*.log
+.env*
+typescript/*
+src/test-queries.ts
+test-*
+src/.DS_Store
+.DS_Store
