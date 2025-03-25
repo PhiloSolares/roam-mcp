@@ -6,6 +6,7 @@ import logging
 from typing import Dict, List, Any, Optional, Union
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from mcp.server.fastmcp import FastMCP
+from datetime import datetime
 
 # Import operations
 from roam_mcp.api import (
