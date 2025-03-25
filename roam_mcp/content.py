@@ -1,5 +1,6 @@
 """Content operations for the Roam MCP server (pages, blocks, and outlines)."""
 
+import logging
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import re
@@ -14,7 +15,8 @@ from roam_mcp.api import (
     add_block_to_page,
     update_block,
     batch_update_blocks,
-    find_page_by_title
+    find_page_by_title,
+    APIError
 )
 from roam_mcp.utils import (
     format_roam_date,
@@ -23,6 +25,9 @@ from roam_mcp.utils import (
     process_nested_content,
     find_block_uid
 )
+
+# Set up logging
+logger = logging.getLogger("roam-mcp.content")
 
 
 def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -59,20 +64,21 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
             "page_url": f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
         }
     except Exception as e:
+        logger.error(f"Error creating page '{title}': {str(e)}")
         return {
             "success": False,
             "error": str(e)
         }
 
 
-def create_block(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None) -> Dict[str, Any]:
+def create_block(content: str, page_uid: Optional[str] = None, title: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a new block in Roam Research.
     
     Args:
         content: Block content
         page_uid: Optional page UID
-        page_title: Optional page title
+        title: Optional page title
         
     Returns:
         Result with block UID
@@ -86,9 +92,9 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
         if page_uid:
             # Use provided page UID
             target_page_uid = page_uid
-        elif page_title:
+        elif title:
             # Find or create page by title
-            target_page_uid = find_or_create_page(page_title)
+            target_page_uid = find_or_create_page(title)
         else:
             # Use today's daily page
             target_page_uid = get_daily_page()
@@ -146,6 +152,7 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
                 "parent_uid": target_page_uid
             }
     except Exception as e:
+        logger.error(f"Error creating block: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -231,7 +238,7 @@ def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] 
                     }
                 }
                 
-                response = execute_write_action(action_data)
+                execute_write_action(action_data)
                 header_uid = find_block_uid(session, headers, GRAPH_NAME, block_text_uid)
                 parent_uid = header_uid
         
@@ -279,6 +286,7 @@ def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] 
             "created_uids": created_uids
         }
     except Exception as e:
+        logger.error(f"Error creating outline: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -370,6 +378,7 @@ def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Op
             "created_uids": created_uids
         }
     except Exception as e:
+        logger.error(f"Error importing markdown: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -421,6 +430,7 @@ def add_todos(todos: List[str]) -> Dict[str, Any]:
             "page_uid": daily_page_uid
         }
     except Exception as e:
+        logger.error(f"Error adding todos: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -485,6 +495,7 @@ def update_content(block_uid: str, content: Optional[str] = None, transform_patt
                 "content": content
             }
     except Exception as e:
+        logger.error(f"Error updating block {block_uid}: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -509,6 +520,7 @@ def update_multiple_contents(updates: List[Dict[str, Any]]) -> Dict[str, Any]:
             "results": results
         }
     except Exception as e:
+        logger.error(f"Error batch updating blocks: {str(e)}")
         return {
             "success": False,
             "error": str(e)
