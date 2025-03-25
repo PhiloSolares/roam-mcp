@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+import traceback
 from typing import Dict, List, Any, Optional, Union
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from mcp.server.fastmcp import FastMCP
@@ -14,7 +15,13 @@ from roam_mcp.api import (
     GRAPH_NAME,
     MEMORIES_TAG,
     get_page_content,
-    APIError
+    ValidationError,
+    QueryError,
+    PageNotFoundError,
+    BlockNotFoundError,
+    TransactionError,
+    AuthenticationError,
+    RateLimitError
 )
 from roam_mcp.search import (
     search_by_text,
@@ -50,6 +57,62 @@ mcp = FastMCP("roam-research")
 logger = logging.getLogger("roam-mcp")
 
 
+def setup_logging(verbose=False):
+    """Configure logging with appropriate level of detail."""
+    log_level = logging.DEBUG if verbose else logging.INFO
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Clear any existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Add console handler
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(log_level)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+
+def validate_environment():
+    """Validate that required environment variables are set."""
+    if not API_TOKEN or not GRAPH_NAME:
+        missing = []
+        if not API_TOKEN:
+            missing.append("ROAM_API_TOKEN")
+        if not GRAPH_NAME:
+            missing.append("ROAM_GRAPH_NAME")
+            
+        error_msg = f"Missing required environment variables: {', '.join(missing)}"
+        logger.error(error_msg)
+        return False
+    
+    return True
+
+
+def format_error_response(error: Exception) -> str:
+    """Format an error for user-friendly display."""
+    if isinstance(error, ValidationError):
+        return f"Validation error: {str(error)}"
+    elif isinstance(error, PageNotFoundError):
+        return f"Page not found: {str(error)}"
+    elif isinstance(error, BlockNotFoundError):
+        return f"Block not found: {str(error)}"
+    elif isinstance(error, QueryError):
+        return f"Query error: {str(error)}"
+    elif isinstance(error, TransactionError):
+        return f"Transaction error: {str(error)}"
+    elif isinstance(error, AuthenticationError):
+        return f"Authentication error: {str(error)}"
+    elif isinstance(error, RateLimitError):
+        return f"Rate limit exceeded: {str(error)}"
+    else:
+        return f"Error: {str(error)}"
+
+
 @mcp.tool()
 async def search_roam(search_terms: List[str]) -> str:
     """Search Roam database for content containing the specified terms.
@@ -57,10 +120,13 @@ async def search_roam(search_terms: List[str]) -> str:
     Args:
         search_terms: List of keywords to search for
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not search_terms:
+            return "Please provide at least one search term"
+        
         all_results = []
         for term in search_terms:
             result = search_by_text(term)
@@ -77,14 +143,18 @@ async def search_roam(search_terms: List[str]) -> str:
             block_word_count = len(content.split())
             
             if word_count + block_word_count <= max_word_count:
-                filtered_results.append(content)
+                filtered_results.append(f"Page: {match.get('page_title', 'Unknown')}\n{content}")
                 word_count += block_word_count
             else:
                 break
         
+        if not filtered_results:
+            return f"No results found for terms: {', '.join(search_terms)}"
+            
         return "\n\n".join(filtered_results)
     except Exception as e:
-        return f"Error searching Roam: {str(e)}"
+        logger.error(f"Error searching Roam: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -94,16 +164,18 @@ async def roam_fetch_page_by_title(title: str) -> str:
     Args:
         title: Title of the page
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not title:
+            return "Error: title is required"
+        
         content = get_page_content(title)
         return content
-    except APIError as e:
-        return f"Error fetching page: {str(e)}"
     except Exception as e:
-        return f"Error fetching page: {str(e)}"
+        logger.error(f"Error fetching page: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -114,17 +186,21 @@ async def roam_create_page(title: str, content: Optional[List[Dict[str, Any]]] =
         title: Title of the new page
         content: Initial content for the page as an array of blocks with explicit nesting levels
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not title:
+            return "Error: title is required"
+        
         result = create_page(title, content)
         if result["success"]:
             return f"Page created successfully: {result['page_url']}"
         else:
             return f"Error creating page: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error creating page: {str(e)}"
+        logger.error(f"Error creating page: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -136,17 +212,23 @@ async def roam_create_block(content: str, page_uid: Optional[str] = None, title:
         page_uid: Optional: UID of the page to add block to
         title: Optional: Title of the page to add block to
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not content:
+            return "Error: content is required"
+        
         result = create_block(content, page_uid, title)
         if result["success"]:
-            return f"Block created successfully with UID: {result['block_uid']}"
+            block_uid = result.get("block_uid", "unknown")
+            parent_uid = result.get("parent_uid", "unknown")
+            return f"Block created successfully with UID: {block_uid} under parent: {parent_uid}"
         else:
             return f"Error creating block: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error creating block: {str(e)}"
+        logger.error(f"Error creating block: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -158,17 +240,24 @@ async def roam_create_outline(outline: List[Dict[str, Any]], page_title_uid: Opt
         page_title_uid: Title or UID of the page. Leave blank to use the default daily page
         block_text_uid: A title heading for the outline or the UID of the block under which content will be nested
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not outline:
+            return "Error: outline is required and cannot be empty"
+        
         result = create_outline(outline, page_title_uid, block_text_uid)
         if result["success"]:
-            return f"Outline created successfully with {len(result.get('created_uids', []))} blocks"
+            created_count = len(result.get("created_uids", []))
+            page_uid = result.get("page_uid", "unknown")
+            parent_uid = result.get("parent_uid", "unknown")
+            return f"Outline created successfully with {created_count} blocks on page {page_uid} under parent {parent_uid}"
         else:
             return f"Error creating outline: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error creating outline: {str(e)}"
+        logger.error(f"Error creating outline: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -185,17 +274,24 @@ async def roam_import_markdown(content: str, page_uid: Optional[str] = None, pag
         parent_string: Optional: Exact string content of the parent block to add content under
         order: Optional: Where to add the content under the parent ("first" or "last")
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not content:
+            return "Error: content is required and cannot be empty"
+        
         result = import_markdown(content, page_uid, page_title, parent_uid, parent_string, order)
         if result["success"]:
-            return f"Markdown imported successfully with {len(result.get('created_uids', []))} blocks"
+            created_count = len(result.get("created_uids", []))
+            page_uid = result.get("page_uid", "unknown")
+            parent_uid = result.get("parent_uid", "unknown")
+            return f"Markdown imported successfully with {created_count} blocks on page {page_uid} under parent {parent_uid}"
         else:
             return f"Error importing markdown: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error importing markdown: {str(e)}"
+        logger.error(f"Error importing markdown: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -205,17 +301,21 @@ async def roam_add_todo(todos: List[str]) -> str:
     Args:
         todos: List of todo items to add
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not todos:
+            return "Error: todos list cannot be empty"
+        
         result = add_todos(todos)
         if result["success"]:
             return f"Added {len(todos)} todo items to today's daily page"
         else:
             return f"Error adding todos: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error adding todos: {str(e)}"
+        logger.error(f"Error adding todos: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -227,10 +327,13 @@ async def roam_search_for_tag(primary_tag: str, page_title_uid: Optional[str] = 
         page_title_uid: Optional: Title or UID of the page to search in
         near_tag: Optional: Another tag to filter results by - will only return blocks where both tags appear
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not primary_tag:
+            return "Error: primary_tag is required"
+        
         result = search_by_tag(primary_tag, page_title_uid, near_tag)
         if result["success"]:
             # Format the results
@@ -244,7 +347,8 @@ async def roam_search_for_tag(primary_tag: str, page_title_uid: Optional[str] = 
         else:
             return f"Error searching for tag: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error searching for tag: {str(e)}"
+        logger.error(f"Error searching for tag: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -258,10 +362,13 @@ async def roam_search_by_status(status: str, page_title_uid: Optional[str] = Non
         include: Optional: Comma-separated list of terms to filter results by inclusion
         exclude: Optional: Comma-separated list of terms to filter results by exclusion
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not status or status not in ["TODO", "DONE"]:
+            return "Error: status must be either 'TODO' or 'DONE'"
+        
         result = search_by_status(status, page_title_uid, include, exclude)
         if result["success"]:
             # Format the results
@@ -275,7 +382,8 @@ async def roam_search_by_status(status: str, page_title_uid: Optional[str] = Non
         else:
             return f"Error searching by status: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error searching by status: {str(e)}"
+        logger.error(f"Error searching by status: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -286,7 +394,7 @@ async def roam_search_block_refs(block_uid: Optional[str] = None, page_title_uid
         block_uid: Optional: UID of the block to find references to
         page_title_uid: Optional: Title or UID of the page to search in
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
@@ -303,7 +411,8 @@ async def roam_search_block_refs(block_uid: Optional[str] = None, page_title_uid
         else:
             return f"Error searching block references: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error searching block references: {str(e)}"
+        logger.error(f"Error searching block references: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -317,10 +426,13 @@ async def roam_search_hierarchy(parent_uid: Optional[str] = None, child_uid: Opt
         page_title_uid: Optional: Title or UID of the page to search in
         max_depth: Optional: How many levels deep to search (default: 1)
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not parent_uid and not child_uid:
+            return "Error: Either parent_uid or child_uid must be provided"
+        
         result = search_hierarchy(parent_uid, child_uid, page_title_uid, max_depth)
         if result["success"]:
             # Format the results
@@ -335,7 +447,8 @@ async def roam_search_hierarchy(parent_uid: Optional[str] = None, child_uid: Opt
         else:
             return f"Error searching hierarchy: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error searching hierarchy: {str(e)}"
+        logger.error(f"Error searching hierarchy: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -345,10 +458,13 @@ async def roam_find_pages_modified_today(max_num_pages: int = 50) -> str:
     Args:
         max_num_pages: Max number of pages to retrieve (default: 50)
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if max_num_pages < 1:
+            return "Error: max_num_pages must be at least 1"
+        
         result = find_pages_modified_today(max_num_pages)
         if result["success"]:
             # Format the results
@@ -361,7 +477,8 @@ async def roam_find_pages_modified_today(max_num_pages: int = 50) -> str:
         else:
             return f"Error finding modified pages: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error finding modified pages: {str(e)}"
+        logger.error(f"Error finding modified pages: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -372,10 +489,13 @@ async def roam_search_by_text(text: str, page_title_uid: Optional[str] = None) -
         text: The text to search for
         page_title_uid: Optional: Title or UID of the page to search in
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not text:
+            return "Error: text is required"
+        
         result = search_by_text(text, page_title_uid)
         if result["success"]:
             # Format the results
@@ -389,7 +509,8 @@ async def roam_search_by_text(text: str, page_title_uid: Optional[str] = None) -
         else:
             return f"Error searching by text: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error searching by text: {str(e)}"
+        logger.error(f"Error searching by text: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -402,17 +523,24 @@ async def roam_update_block(block_uid: str, content: Optional[str] = None,
         content: New content for the block
         transform_pattern: Pattern to transform the current content
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not block_uid:
+            return "Error: block_uid is required"
+        
+        if not content and not transform_pattern:
+            return "Error: Either content or transform_pattern must be provided"
+        
         result = update_content(block_uid, content, transform_pattern)
         if result["success"]:
             return f"Block updated successfully: {result['content']}"
         else:
             return f"Error updating block: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error updating block: {str(e)}"
+        logger.error(f"Error updating block: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -422,18 +550,22 @@ async def roam_update_multiple_blocks(updates: List[Dict[str, Any]]) -> str:
     Args:
         updates: Array of block updates to perform
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not updates or not isinstance(updates, list):
+            return "Error: updates must be a non-empty list"
+        
         result = update_multiple_contents(updates)
         if result["success"]:
-            successful = sum(1 for r in result["results"] if r["success"])
+            successful = sum(1 for r in result["results"] if r.get("success"))
             return f"Updated {successful}/{len(updates)} blocks successfully"
         else:
             return f"Error updating blocks: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error updating blocks: {str(e)}"
+        logger.error(f"Error updating blocks: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -449,10 +581,19 @@ async def roam_search_by_date(start_date: str, end_date: Optional[str] = None,
         scope: Whether to search "blocks", "pages", or "both"
         include_content: Whether to include the content of matching blocks/pages
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not start_date:
+            return "Error: start_date is required"
+        
+        if type_filter not in ["created", "modified", "both"]:
+            return "Error: type_filter must be 'created', 'modified', or 'both'"
+        
+        if scope not in ["blocks", "pages", "both"]:
+            return "Error: scope must be 'blocks', 'pages', or 'both'"
+        
         result = search_by_date(start_date, end_date, type_filter, scope, include_content)
         if result["success"]:
             # Format the results
@@ -460,6 +601,7 @@ async def roam_search_by_date(start_date: str, end_date: Optional[str] = None,
             
             for match in result["matches"]:
                 date_info = datetime.fromtimestamp(match["time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                
                 if match["type"] == "block":
                     page_info = f" (in page: {match.get('page_title', 'Unknown')})"
                     content_info = f": {match.get('content', '')}" if include_content else ""
@@ -473,7 +615,8 @@ async def roam_search_by_date(start_date: str, end_date: Optional[str] = None,
         else:
             return f"Error searching by date: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error searching by date: {str(e)}"
+        logger.error(f"Error searching by date: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -484,17 +627,21 @@ async def roam_remember(memory: str, categories: Optional[List[str]] = None) -> 
         memory: The memory detail or information to remember
         categories: Optional categories to tag the memory with
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not memory:
+            return "Error: memory is required"
+        
         result = remember(memory, categories)
         if result["success"]:
             return f"Memory stored successfully: {result['content']}"
         else:
             return f"Error storing memory: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error storing memory: {str(e)}"
+        logger.error(f"Error storing memory: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -505,10 +652,13 @@ async def roam_recall(sort_by: str = "newest", filter_tag: Optional[str] = None)
         sort_by: Sort order for memories based on creation date
         filter_tag: Include only memories with a specific filter tag
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if sort_by not in ["newest", "oldest"]:
+            return "Error: sort_by must be 'newest' or 'oldest'"
+        
         result = recall(sort_by, filter_tag)
         if result["success"]:
             # Format the results
@@ -521,7 +671,8 @@ async def roam_recall(sort_by: str = "newest", filter_tag: Optional[str] = None)
         else:
             return f"Error recalling memories: {result.get('error', 'Unknown error')}"
     except Exception as e:
-        return f"Error recalling memories: {str(e)}"
+        logger.error(f"Error recalling memories: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -532,10 +683,13 @@ async def roam_datomic_query(query: str, inputs: Optional[List[Any]] = None) -> 
         query: The Datomic query to execute (in Datalog syntax)
         inputs: Optional array of input parameters for the query
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
+        if not query:
+            return "Error: query is required"
+        
         result = execute_datomic_query(query, inputs)
         if result["success"]:
             # Format the results
@@ -548,7 +702,8 @@ async def roam_datomic_query(query: str, inputs: Optional[List[Any]] = None) -> 
         else:
             return f"Error executing query: {result.get('message', 'Unknown error')}"
     except Exception as e:
-        return f"Error executing query: {str(e)}"
+        logger.error(f"Error executing query: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.tool()
@@ -597,6 +752,7 @@ async def get_youtube_transcript(url: str) -> str:
     except TranscriptsDisabled:
         return "Transcripts are disabled for this video."
     except Exception as e:
+        logger.error(f"Error fetching YouTube transcript: {str(e)}", exc_info=True)
         return f"An error occurred while fetching the transcript: {str(e)}"
 
 
@@ -604,7 +760,7 @@ async def get_youtube_transcript(url: str) -> str:
 async def get_roam_graph_info() -> str:
     """Get information about your Roam Research graph.
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
     
     try:
@@ -643,7 +799,8 @@ Memory Tag: {memory_tag}
         
         return formatted_info
     except Exception as e:
-        return f"Error retrieving graph information: {str(e)}"
+        logger.error(f"Error retrieving graph information: {str(e)}", exc_info=True)
+        return format_error_response(e)
 
 
 @mcp.prompt()
@@ -654,7 +811,7 @@ async def summarize_page(page_title: str) -> dict:
     Args:
         page_title: Title of the page to summarize
     """
-    if not API_TOKEN or not GRAPH_NAME:
+    if not validate_environment():
         return {
             "messages": [{
                 "role": "user",
@@ -672,10 +829,11 @@ async def summarize_page(page_title: str) -> dict:
             }]
         }
     except Exception as e:
+        logger.error(f"Error creating summary prompt: {str(e)}", exc_info=True)
         return {
             "messages": [{
                 "role": "user",
-                "content": f"I wanted to summarize my Roam page titled '{page_title}', but there was an error retrieving the content: {str(e)}. Can you help me troubleshoot this issue with my Roam Research integration?"
+                "content": f"I wanted to summarize my Roam page titled '{page_title}', but there was an error retrieving the content: {format_error_response(e)}. Can you help me troubleshoot this issue with my Roam Research integration?"
             }]
         }
 
@@ -683,19 +841,33 @@ async def summarize_page(page_title: str) -> dict:
 def run_server(transport="stdio", port=None, verbose=False):
     """Run the MCP server with the specified transport."""
     # Configure logging based on verbosity
-    log_level = logging.INFO if verbose else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        stream=sys.stderr
-    )
+    setup_logging(verbose)
     
     logger.info("Server starting...")
     
-    # Print information about API token and graph name
-    logger.info(f"API token is {'set' if API_TOKEN else 'NOT SET'}")
-    logger.info(f"Graph name is {'set' if GRAPH_NAME else 'NOT SET'}")
-    logger.info(f"MEMORIES_TAG is set to: {MEMORIES_TAG}")
+    # Validate environment variables
+    valid_env = validate_environment()
+    if valid_env:
+        logger.info(f"API token and graph name are set")
+        logger.info(f"MEMORIES_TAG is set to: {MEMORIES_TAG}")
+    else:
+        logger.warning("Missing required environment variables")
     
     # Run the server
-    mcp.run(transport=transport)
+    try:
+        if transport == "stdio":
+            logger.info("Starting server with stdio transport")
+            mcp.run(transport="stdio")
+        elif transport == "sse":
+            if not port:
+                port = 3000
+            logger.info(f"Starting server with SSE transport on port {port}")
+            mcp.run(transport="sse", port=port)
+        else:
+            logger.error(f"Unsupported transport: {transport}")
+            sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Error running server: {str(e)}")
+        traceback.print_exc()
