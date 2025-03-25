@@ -837,11 +837,11 @@ def get_page_content(title: str, resolve_refs: bool = True) -> str:
     
     # Define query rule for ancestor relationship
     ancestor_rule = """[
-        [(ancestor ?block ?ancestor)
-            [?ancestor :block/children ?block]]
-        [(ancestor ?block ?ancestor)
-            [?mid :block/children ?block]
-            (ancestor ?mid ?ancestor)]
+        [(ancestor ?child ?parent)
+            [?parent :block/children ?child]]
+        [(ancestor ?child ?parent)
+            [?p :block/children ?child]
+            (ancestor ?p ?parent)]
     ]"""
     
     # Get all blocks on the page with their hierarchy information
