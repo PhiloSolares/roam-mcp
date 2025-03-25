@@ -811,13 +811,14 @@ def batch_update_blocks(updates: List[Dict[str, Any]], chunk_size: int = 50) -> 
     return results
 
 
-def get_page_content(title: str, resolve_refs: bool = True) -> str:
+def get_page_content(title: str, resolve_refs: bool = True, max_depth: int = 5) -> str:
     """
     Get the content of a page with optional block reference resolution.
     
     Args:
         title: Page title
         resolve_refs: Whether to resolve block references
+        max_depth: Maximum depth of nested blocks to retrieve (default: 5)
         
     Returns:
         Page content as markdown
@@ -835,57 +836,63 @@ def get_page_content(title: str, resolve_refs: bool = True) -> str:
     if not page_uid:
         raise PageNotFoundError(title)
     
-    # Define query rule for ancestor relationship
-    ancestor_rule = """[
-        [(ancestor ?child ?parent)
-            [?parent :block/children ?child]]
-        [(ancestor ?child ?parent)
-            [?p :block/children ?child]
-            (ancestor ?p ?parent)]
-    ]"""
+    # Build block hierarchy iteratively
+    block_map = {}
+    top_level_blocks = []
     
-    # Get all blocks on the page with their hierarchy information
-    query = f"""[:find ?uid ?string ?order ?parent-uid
-                :in $ % ?page-uid
-                :where
-                [?page :block/uid ?page-uid]
-                [?block :block/string ?string]
-                [?block :block/uid ?uid]
-                [?block :block/order ?order]
-                (ancestor ?block ?page)
-                [?parent :block/children ?block]
-                [?parent :block/uid ?parent-uid]]"""
+    # Query to get immediate children of a parent (page or block)
+    def get_children(parent_uid: str, depth: int = 0) -> None:
+        if depth >= max_depth:
+            return
+        
+        query = f"""[:find ?uid ?string ?order
+                    :where
+                    [?parent :block/uid "{parent_uid}"]
+                    [?parent :block/children ?child]
+                    [?child :block/uid ?uid]
+                    [?child :block/string ?string]
+                    [?child :block/order ?order]]"""
+        
+        try:
+            results = execute_query(query)
+            if not results:
+                return
+            
+            for uid, content, order in results:
+                # Resolve references if requested
+                if resolve_refs:
+                    content = resolve_block_references(session, headers, GRAPH_NAME, content)
+                
+                # Create block object
+                block = {
+                    "uid": uid,
+                    "content": content,
+                    "order": order,
+                    "children": []
+                }
+                
+                block_map[uid] = block
+                
+                # Add to top-level or parent's children
+                if parent_uid == page_uid:
+                    top_level_blocks.append(block)
+                elif parent_uid in block_map:
+                    block_map[parent_uid]["children"].append(block)
+                
+                # Recursively fetch children
+                get_children(uid, depth + 1)
+                
+        except QueryError as e:
+            logger.warning(f"Failed to fetch children for {parent_uid}: {str(e)}")
+            raise
     
     try:
-        blocks = execute_query(query, [ancestor_rule, page_uid])
+        # Start with the page's top-level blocks
+        get_children(page_uid)
         
-        if not blocks:
+        if not top_level_blocks:
             logger.debug(f"No content found on page: {title}")
             return f"# {title}\n\nNo content found on this page."
-        
-        # Build a block hierarchy
-        block_map = {}
-        top_level_blocks = []
-        
-        for uid, content, order, parent_uid in blocks:
-            # Create block object
-            if resolve_refs:
-                content = resolve_block_references(session, headers, GRAPH_NAME, content)
-                
-            block = {
-                "uid": uid,
-                "content": content,
-                "order": order,
-                "children": []
-            }
-            
-            block_map[uid] = block
-            
-            # Add to parent's children or top level if parent is the page
-            if parent_uid == page_uid:
-                top_level_blocks.append(block)
-            elif parent_uid in block_map:
-                block_map[parent_uid]["children"].append(block)
         
         # Sort blocks by order
         def sort_blocks(blocks):
@@ -917,4 +924,4 @@ def get_page_content(title: str, resolve_refs: bool = True) -> str:
     except Exception as e:
         error_msg = f"Failed to get page content: {str(e)}"
         logger.error(error_msg)
-        raise QueryError(error_msg, query, {"page_title": title, "page_uid": page_uid}) from e
+        raise QueryError(error_msg, "Iterative child fetch", {"page_title": title, "page_uid": page_uid}) from e
