@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set, Match, Tuple, Union
 import json
+from roam_mcp.api import QueryError
 
 # Set up logging
 logger = logging.getLogger("roam-mcp.utils")
@@ -833,7 +834,7 @@ def resolve_block_references(client, content: str, max_depth: int = 3, current_d
         logger.debug(f"Resolving block reference: (({ref_uid})) at depth {current_depth}")
         try:
             # Query for the referenced block's string content
-            query = f'''[:find ?string .
+            query = f'''[:find ?string
                         :in $ ?uid
                         :where [?b :block/uid ?uid]
                                [?b :block/string ?string]]'''

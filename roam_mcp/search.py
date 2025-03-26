@@ -182,7 +182,7 @@ def search_by_tag(tag: str, page_title_uid: Optional[str] = None, near_tag: Opti
         
         # Query using :block/refs based on the tag's corresponding page title
         # Find the entity ID (:db/id) of the tag page first
-        tag_page_query = f'''[:find ?p . :in $ ?title :where [?p :node/title ?title]]'''
+        tag_page_query = f'''[:find ?p :in $ ?title :where [?p :node/title ?title]]'''
         tag_page_eid = client.query(tag_page_query, inputs=[clean_tag])
 
         if not tag_page_eid:
