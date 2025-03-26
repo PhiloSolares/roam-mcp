@@ -486,19 +486,6 @@ def create_block_action(parent_uid: str, content: str, order: Union[int, str] = 
     if heading and heading > 0 and heading <= 3:
         block_data["heading"] = heading
     
-    # Handle temporary parent UIDs
-    if isinstance(parent_uid, str) and parent_uid.startswith("temp_"):
-        # For temporary UIDs in batch operations, we'll use a special reference format
-        # that will be resolved during batch processing
-        return {
-            "action": "create-block",
-            "location": {
-                "parent-uid": parent_uid,
-                "order": order
-            },
-            "block": block_data
-        }
-    
     return {
         "action": "create-block",
         "location": {
