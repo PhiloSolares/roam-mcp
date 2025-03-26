@@ -8,916 +8,1167 @@ from typing import Dict, List, Any, Optional, Union
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime
+import json
+from pydantic import ValidationError as PydanticValidationError
+from dotenv import load_dotenv
 
-# Import client getter and specific errors
+# Import operations
 from roam_mcp.api import (
-    get_client, # Use this to get client instance
-    get_api_token,
-    get_graph_name,
-    get_memories_tag,
-    get_page_content, # This now uses the client
+    API_TOKEN,
+    GRAPH_NAME,
+    MEMORIES_TAG,
+    client,
     ValidationError,
     QueryError,
     PageNotFoundError,
     BlockNotFoundError,
     TransactionError,
     AuthenticationError,
-    RateLimitError,
-    RoamAPIError # Base error
+    RateLimitError
 )
-# Import operations modules
-from roam_mcp import search, content as content_ops, memory as memory_ops
-
-# Import utils needed
+from roam_mcp.search import search_ops
+from roam_mcp.content import content_ops
+from roam_mcp.memory import memory_ops
 from roam_mcp.utils import extract_youtube_video_id
+from roam_mcp.models import (
+    CreatePageSchema,
+    CreateBlockSchema,
+    CreateOutlineSchema,
+    ImportMarkdownSchema,
+    AddTodoSchema,
+    SearchTagSchema,
+    SearchStatusSchema,
+    SearchBlockRefsSchema,
+    SearchHierarchySchema,
+    SearchTextSchema,
+    UpdateBlockSchema,
+    UpdateMultipleSchema,
+    SearchDateSchema,
+    RememberSchema,
+    RecallSchema,
+    DatomicQuerySchema,
+    YouTubeTranscriptSchema,
+    SummarizePageSchema
+)
 
-# Initialize FastMCP server
-mcp = FastMCP("roam-research")
-
-# Configure logging
-logger = logging.getLogger("roam-mcp")
-
-
-# --- Server Setup ---
-
-def setup_logging(verbose=False):
-    """Configure logging with appropriate level of detail."""
-    log_level = logging.DEBUG if verbose else logging.INFO
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Tool handler class (facade pattern)
+class RoamToolHandler:
+    """Central handler for all Roam tools - implements facade pattern."""
     
-    # Use basicConfig to set up root logger simply
-    logging.basicConfig(level=log_level, format=log_format, stream=sys.stderr)
+    def __init__(self):
+        """Initialize with operations instances."""
+        # Each tool should validate its own inputs
+        pass
     
-    # Optionally disable logging from libraries if too verbose
-    # logging.getLogger("requests").setLevel(logging.WARNING)
-    # logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-    logger.info(f"Logging setup complete. Level: {logging.getLevelName(log_level)}")
-
-
-def validate_environment_and_log() -> bool:
-    """
-    Validate required environment variables and log status or detailed setup instructions.
-    Returns True if valid, False otherwise.
-    """
-    api_token = get_api_token()
-    graph_name = get_graph_name()
-
-    if api_token and graph_name:
-        logger.info("ROAM_API_TOKEN and ROAM_GRAPH_NAME are set.")
-        # Attempt to initialize client early to catch auth errors?
-        try:
-             _ = get_client() # Initializes if not already done
-             logger.info(f"Successfully initialized client for graph '{graph_name}'.")
-             logger.info(f"MEMORIES_TAG is set to: '{get_memories_tag()}'")
-             return True
-        except AuthenticationError as e:
-             logger.error(f"Authentication failed during initial client setup: {e}")
-             # Print detailed setup help for auth errors too
-             print_setup_instructions(api_token_found=bool(api_token), graph_name_found=bool(graph_name), auth_error=str(e))
-             return False
-        except Exception as e:
-             logger.error(f"Unexpected error during initial client setup: {e}", exc_info=True)
-             print_setup_instructions(api_token_found=bool(api_token), graph_name_found=bool(graph_name), auth_error=f"Unexpected error: {e}")
-             return False
-    else:
-        missing = []
-        if not api_token: missing.append("ROAM_API_TOKEN")
-        if not graph_name: missing.append("ROAM_GRAPH_NAME")
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        print_setup_instructions(api_token_found=bool(api_token), graph_name_found=bool(graph_name))
-        return False
-
-def print_setup_instructions(api_token_found: bool, graph_name_found: bool, auth_error: Optional[str] = None):
-    """Prints detailed setup instructions to stderr."""
-    lines = [
-        "--- Roam MCP Server Configuration Error ---",
-        "Please set the required environment variables:",
-    ]
-    if not api_token_found:
-        lines.append("  - ROAM_API_TOKEN: Your Roam Research API token.")
-    if not graph_name_found:
-        lines.append("  - ROAM_GRAPH_NAME: The exact name of your Roam graph.")
+    def search_roam(self, search_terms: List[str]) -> str:
+        """
+        Search Roam database for content containing the specified terms.
         
-    if auth_error:
-         lines.append(f"\nAuthentication Error: {auth_error}")
-         lines.append("Suggestion: Double-check your API token and graph name spelling/case.")
-
-    lines.extend([
-        "\nYou can configure these using your MCP client (e.g., Claude Desktop) or by creating a .env file.",
-        "\nExample using Claude Desktop config (~/Library/Application Support/Claude/claude_desktop_config.json):",
-        '''
-{
-  "mcpServers": {
-    "roam-helper": {
-      "command": "uvx",
-      "args": ["git+https://github.com/PhiloSolares/roam-mcp.git"],
-      "env": {
-        "ROAM_API_TOKEN": "your-roam-api-token-here",
-        "ROAM_GRAPH_NAME": "your-roam-graph-name-here",
-        "MEMORIES_TAG": "#[[Optional/MemoryTag]]"
-      }
-    }
-  }
-}
-        ''',
-        "Note: Replace placeholders with your actual token and graph name.",
-        "Ensure the 'command' and 'args' point correctly to how you run this server (uvx example shown).",
-        "Restart your MCP client after modifying the configuration.",
-        "---------------------------------------------"
-    ])
-    print("\n".join(lines), file=sys.stderr)
-
-def format_error_response(error: Exception) -> str:
-    """Format an error into a user-friendly string for MCP response."""
-    # Use the custom error hierarchy if possible
-    if isinstance(error, RoamAPIError):
-        # Include code, message, and remediation suggestion
-        msg = f"Error Code: {error.code}\nMessage: {error.message}"
-        if error.remediation:
-            msg += f"\nSuggestion: {error.remediation}"
-        # Optionally include details for debugging if needed, but might be too verbose for AI
-        # if error.details: msg += f"\nDetails: {json.dumps(error.details)}"
-        return msg
-    elif isinstance(error, (YouTubeTranscriptApi.CouldNotRetrieveTranscript, TranscriptsDisabled)):
-         return f"YouTube Transcript Error: {str(error)}"
-    else:
-        # Generic fallback
-        return f"An unexpected error occurred: {str(error)}"
-
-
-# --- MCP Tool Definitions ---
-
-@mcp.tool()
-async def search_roam(search_terms: List[str]) -> str:
-    """Search Roam database for content containing the specified terms. Returns combined results.
-
-    Args:
-        search_terms: List of keywords to search for. Case-sensitivity depends on Roam setup.
-    """
-    if not validate_environment_and_log(): # Ensure env vars are checked on each call? Or just at start? Let's check each time.
-        return "Configuration Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME must be set. See server logs for details."
-    
-    try:
-        if not search_terms or not isinstance(search_terms, list):
-            raise ValidationError("Please provide a list of search terms.", "search_terms")
+        Args:
+            search_terms: List of keywords to search for
+        """
+        if not search_terms:
+            return "Please provide at least one search term"
         
-        all_matches = []
-        combined_message = ""
-        
-        # Run search for each term
+        all_results = []
         for term in search_terms:
-            if not isinstance(term, str) or not term.strip(): continue # Skip empty terms
-            
-            result = search.search_by_text(term.strip()) # Use module function
+            result = search_ops.search_by_text(term)
             if result["success"]:
-                all_matches.extend(result["matches"])
-            # Combine messages or just use the last one? Let's build a summary.
-            combined_message += result.get("message", f"Search for '{term}' completed.") + "\n"
-            
-        # Deduplicate results based on block_uid
-        unique_matches = {match['block_uid']: match for match in all_matches}.values()
+                all_results.extend(result["matches"])
         
-        # Limit total output size (e.g., by word count or number of results)
-        # Simple limit by number of results for now
-        MAX_RESULTS = 50
-        limited_matches = list(unique_matches)[:MAX_RESULTS]
+        # Limit to 3000 words
+        word_count = 0
+        max_word_count = 3000
+        filtered_results = []
         
-        if not limited_matches:
-            return f"No results found containing any of the terms: {', '.join(search_terms)}"
+        for match in all_results:
+            content = match["content"]
+            block_word_count = len(content.split())
             
-        # Format the output
-        output_lines = [f"Found {len(limited_matches)} unique blocks (limit {MAX_RESULTS}) matching terms: {', '.join(search_terms)}"]
-        for match in limited_matches:
-            page_info = f"Page: {match.get('page_title', 'Unknown')}"
-            content = match.get('content', '')
-            output_lines.append(f"\n---\n{page_info}\nUID: {match.get('block_uid', 'N/A')}\n{content}")
-            
-        return "\n".join(output_lines)
+            if word_count + block_word_count <= max_word_count:
+                filtered_results.append(f"Page: {match.get('page_title', 'Unknown')}\n{content}")
+                word_count += block_word_count
+            else:
+                break
         
-    except Exception as e:
-        logger.error(f"Error in search_roam tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_fetch_page_by_title(title: str) -> str:
-    """Retrieve complete page contents by exact title (case-insensitive fallback), including nested blocks and resolved references.
-
-    Args:
-        title: Title of the page (e.g., "My Project Notes", "January 1st, 2024").
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
+        if not filtered_results:
+            return f"No results found for terms: {', '.join(search_terms)}"
+            
+        return "\n\n".join(filtered_results)
     
-    try:
-        if not title or not isinstance(title, str):
-            raise ValidationError("Page title must be provided as a string.", "title")
+    def fetch_page_by_title(self, title: str) -> str:
+        """
+        Retrieve complete page contents by exact title.
         
-        # get_page_content uses the client and handles finding/errors
-        content = get_page_content(title.strip())
-        return content
-        
-    except Exception as e: # Catch errors from get_page_content
-        logger.error(f"Error in roam_fetch_page_by_title: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Create a new page. Optionally add initial content specified with text and nesting level.
-
-    Args:
-        title: Title for the new page.
-        content: Optional list of blocks, e.g., [{"text": "Item 1", "level": 1}, {"text": "Sub A", "level": 2}].
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
+        Args:
+            title: Title of the page
+        """
+        try:
+            from roam_mcp.api import get_page_content
+            content = get_page_content(title)
+            return content
+        except (PageNotFoundError, QueryError) as e:
+            return f"Error: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error fetching page: {str(e)}", exc_info=True)
+            return f"Error: {str(e)}"
     
-    try:
-        if not title or not isinstance(title, str):
-            raise ValidationError("Page title must be provided as a non-empty string.", "title")
+    def create_page(self, schema: CreatePageSchema) -> str:
+        """
+        Create a new page in Roam Research.
         
-        result = content_ops.create_page(title.strip(), content) # Use module function
-        
+        Args:
+            schema: Validated page creation parameters
+        """
+        result = content_ops.create_page(schema.title, schema.content)
         if result["success"]:
-            msg = f"Page '{title}' created/found successfully."
-            if "page_url" in result: msg += f" URL: {result['page_url']}"
-            if "created_uids" in result and result["created_uids"]: msg += f" Added {len(result['created_uids'])} content blocks."
-            return msg
+            return f"Page created successfully: {result.get('page_url', '')}"
         else:
-            # Use the error message from the result dict
-            return f"Error creating page '{title}': {result.get('error', 'Unknown error')}"
-            
-    except Exception as e:
-        logger.error(f"Error in roam_create_page tool: {str(e)}", exc_info=True)
-        # Format error using the custom hierarchy if possible
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_create_block(content: str, page_uid: Optional[str] = None, title: Optional[str] = None) -> str:
-    """Add a new block. Defaults to today's daily note if no page context is given. Handles multi-line markdown input.
-
-    Args:
-        content: Content for the block (can include markdown).
-        page_uid: Optional UID of the target page.
-        title: Optional title of the target page (used if page_uid is absent, finds or creates page).
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
+            return f"Error creating page: {result.get('error', 'Unknown error')}"
+    
+    def create_block(self, schema: CreateBlockSchema) -> str:
+        """
+        Add a new block to an existing Roam page.
         
-    try:
-        if not content or not isinstance(content, str):
-             raise ValidationError("Block content must be provided as a non-empty string.", "content")
-             
-        result = content_ops.create_block(content, page_uid, title) # Use module function
-        
+        Args:
+            schema: Validated block creation parameters
+        """
+        result = content_ops.create_block(schema.content, schema.page_uid, schema.title)
         if result["success"]:
-            block_uid = result.get("block_uid", "N/A")
-            parent_uid = result.get("parent_uid", "N/A")
-            num_created = len(result.get("created_uids", [block_uid])) # Count all UIDs if nested
-            return f"Block(s) created successfully (Top UID: {block_uid}, Count: {num_created}) under parent: {parent_uid}"
+            block_uid = result.get("block_uid", "unknown")
+            parent_uid = result.get("parent_uid", "unknown")
+            return f"Block created successfully with UID: {block_uid} under parent: {parent_uid}"
         else:
             return f"Error creating block: {result.get('error', 'Unknown error')}"
-            
-    except Exception as e:
-        logger.error(f"Error in roam_create_block tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] = None, block_text_uid: Optional[str] = None) -> str:
-    """Add a structured outline under a page or block. Specify items with 'text' and 'level'.
-
-    Args:
-        outline: List of outline items, e.g., [{"text": "Topic 1", "level": 1}, {"text": "Detail A", "level": 2}].
-        page_title_uid: Optional target page (title or UID). Defaults to daily page.
-        block_text_uid: Optional parent block (text or UID) to nest under. If text, finds/creates block. Defaults to page root.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
+    
+    def create_outline(self, schema: CreateOutlineSchema) -> str:
+        """
+        Add a structured outline to an existing page or block.
         
-    try:
-        if not outline or not isinstance(outline, list):
-            raise ValidationError("Outline must be provided as a non-empty list.", "outline")
-            
-        result = content_ops.create_outline(outline, page_title_uid, block_text_uid) # Use module function
-        
+        Args:
+            schema: Validated outline creation parameters
+        """
+        result = content_ops.create_outline(schema.outline, schema.page_title_uid, schema.block_text_uid)
         if result["success"]:
-            count = len(result.get("created_uids", []))
-            parent_display = result.get('parent_uid', 'N/A')
-            page_display = result.get('page_uid', 'N/A')
-            # Optionally lookup parent/page titles for better message? Maybe too slow.
-            return f"Outline created successfully with {count} top-level items under parent {parent_display} on page {page_display}."
+            created_count = len(result.get("created_uids", []))
+            page_uid = result.get("page_uid", "unknown")
+            parent_uid = result.get("parent_uid", "unknown")
+            return f"Outline created successfully with {created_count} blocks on page {page_uid} under parent {parent_uid}"
         else:
             return f"Error creating outline: {result.get('error', 'Unknown error')}"
-            
-    except Exception as e:
-        logger.error(f"Error in roam_create_outline tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_import_markdown(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None,
-                            parent_uid: Optional[str] = None, parent_string: Optional[str] = None, 
-                            order: str = "last") -> str:
-    """Import nested markdown content under a specific block or page. Converts common markdown.
-
-    Args:
-        content: Markdown text (can be multi-line, nested lists, etc.).
-        page_uid: Optional UID of the target page.
-        page_title: Optional title of the target page (finds/creates if no page_uid).
-        parent_uid: Optional UID of the parent block to nest under.
-        parent_string: Optional exact text of the parent block (requires page context).
-        order: Where to add top-level items ("first" or "last"). Default: "last".
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
+    
+    def import_markdown(self, schema: ImportMarkdownSchema) -> str:
+        """
+        Import nested markdown content into Roam.
         
-    try:
-        if not content or not isinstance(content, str):
-             # Allow empty content import? Let's treat as success no-op.
-             return "Content was empty, nothing imported."
-             # raise ValidationError("Markdown content must be provided as a non-empty string.", "content")
-
-        if order not in ["first", "last"]:
-             raise ValidationError("Order must be 'first' or 'last'.", "order")
-             
-        result = content_ops.import_markdown(content, page_uid, page_title, parent_uid, parent_string, order) # Use module function
-        
+        Args:
+            schema: Validated markdown import parameters
+        """
+        result = content_ops.import_markdown(
+            schema.content, 
+            schema.page_uid, 
+            schema.page_title,
+            schema.parent_uid, 
+            schema.parent_string, 
+            schema.order
+        )
         if result["success"]:
-            count = len(result.get("created_uids", []))
-            parent_display = result.get('parent_uid', 'N/A')
-            page_display = result.get('page_uid', 'N/A')
-            message = result.get("message", f"Markdown imported successfully, creating {count} top-level blocks under parent {parent_display} on page {page_display}.")
-            return message
+            created_count = len(result.get("created_uids", []))
+            page_uid = result.get("page_uid", "unknown")
+            parent_uid = result.get("parent_uid", "unknown")
+            return f"Markdown imported successfully with {created_count} blocks on page {page_uid} under parent {parent_uid}"
         else:
             return f"Error importing markdown: {result.get('error', 'Unknown error')}"
-            
-    except Exception as e:
-        logger.error(f"Error in roam_import_markdown tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-@mcp.tool()
-async def roam_add_todo(todos: List[str]) -> str:
-    """Add multiple todo items (each as a block with {{[[TODO]]}}) to today's daily page.
-
-    Args:
-        todos: List of strings, each representing a todo item.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
+    
+    def add_todos(self, schema: AddTodoSchema) -> str:
+        """
+        Add todo items to today's daily page.
         
-    try:
-        if not todos or not isinstance(todos, list):
-             raise ValidationError("Provide a list of todo strings.", "todos")
-             
-        result = content_ops.add_todos(todos) # Use module function
-        
+        Args:
+            schema: Validated todo parameters
+        """
+        result = content_ops.add_todos(schema.todos)
         if result["success"]:
-            count = len(result.get("created_uids", []))
-            page_uid = result.get("page_uid", "N/A")
-            return f"Added {count} TODO items to daily page {page_uid}."
+            return f"Added {len(schema.todos)} todo items to today's daily page"
         else:
             return f"Error adding todos: {result.get('error', 'Unknown error')}"
-            
-    except Exception as e:
-        logger.error(f"Error in roam_add_todo tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-# --- Search Tools ---
-
-def _format_search_results(result_dict: Dict[str, Any]) -> str:
-    """Helper to format search results for MCP response."""
-    if not result_dict["success"]:
-        return f"Search failed: {result_dict.get('message', 'Unknown error')}"
-        
-    matches = result_dict.get("matches", [])
-    message = result_dict.get("message", f"Found {len(matches)} results.")
     
-    if not matches:
-        return message # Return "No results found..." message
-
-    output_lines = [message]
-    MAX_RESULTS_DISPLAY = 30 # Limit display length
-    for i, match in enumerate(matches):
-         if i >= MAX_RESULTS_DISPLAY:
-              output_lines.append(f"\n... (truncated {len(matches) - MAX_RESULTS_DISPLAY} more results)")
-              break
-              
-         page_info = f"Page: {match.get('page_title', 'Unknown')}"
-         uid_info = f"UID: {match.get('block_uid', 'N/A')}"
-         extra_info = ""
-         if "depth" in match: extra_info += f" Depth: {match['depth']}"
-         if "time" in match:
-             ts = match['time'] / 1000 # Convert ms to s
-             dt_obj = datetime.fromtimestamp(ts)
-             time_type = match.get('time_type', 'Time')
-             extra_info += f" {time_type.capitalize()}: {dt_obj.strftime('%Y-%m-%d %H:%M')}"
-         
-         content = match.get('content', '')
-         output_lines.append(f"\n---\n{page_info} ({uid_info}){extra_info}\n{content}")
-         
-    return "\n".join(output_lines)
-
-
-@mcp.tool()
-async def roam_search_for_tag(primary_tag: str, page_title_uid: Optional[str] = None, near_tag: Optional[str] = None) -> str:
-    """Search for blocks referencing a specific tag (page). Optionally filter if another tag is nearby in the block string.
-
-    Args:
-        primary_tag: The tag to search for (e.g., "My Project"). Do not include # or [[ ]].
-        page_title_uid: Optional: Title or UID of a page to limit the search scope.
-        near_tag: Optional: Another tag name. Results will only include blocks containing both the primary tag reference and this near tag text.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        if not primary_tag or not isinstance(primary_tag, str):
-            raise ValidationError("primary_tag must be provided as a string.", "primary_tag")
+    def search_for_tag(self, schema: SearchTagSchema) -> str:
+        """
+        Search for blocks containing a specific tag.
+        
+        Args:
+            schema: Validated tag search parameters
+        """
+        result = search_ops.search_by_tag(schema.primary_tag, schema.page_title_uid, schema.near_tag)
+        if result["success"]:
+            # Format the results
+            formatted = f"{result['message']}\n\n"
             
-        result = search.search_by_tag(primary_tag, page_title_uid, near_tag)
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_search_for_tag tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_search_by_status(status: str, page_title_uid: Optional[str] = None, 
-                              include: Optional[str] = None, exclude: Optional[str] = None) -> str:
-    """Find blocks marked with {{[[TODO]]}} or {{[[DONE]]}}. Optionally filter by included/excluded keywords in the block content.
-
-    Args:
-        status: Status to search for ("TODO" or "DONE").
-        page_title_uid: Optional: Title or UID of a page to limit scope.
-        include: Optional: Comma-separated keywords. Block must contain at least one.
-        exclude: Optional: Comma-separated keywords. Block must contain none of these.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        # Validation is handled within search_by_status
-        result = search.search_by_status(status, page_title_uid, include, exclude)
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_search_by_status tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_search_block_refs(block_uid: Optional[str] = None, page_title_uid: Optional[str] = None) -> str:
-    """Find blocks containing block references `((...))`. If block_uid is given, finds references *to* that specific block.
-
-    Args:
-        block_uid: Optional: Find references pointing to this specific 9-char block UID.
-        page_title_uid: Optional: Title or UID of a page to limit scope.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        result = search.search_block_refs(block_uid, page_title_uid)
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_search_block_refs tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_search_hierarchy(parent_uid: Optional[str] = None, child_uid: Optional[str] = None,
-                              page_title_uid: Optional[str] = None, max_depth: int = 1) -> str:
-    """Explore block hierarchy. Provide parent_uid to find descendants, or child_uid to find ancestors.
-
-    Args:
-        parent_uid: Optional: Find children/descendants of this block UID.
-        child_uid: Optional: Find parents/ancestors of this block UID.
-        page_title_uid: Optional: Title or UID of a page to limit scope (searches blocks ON this page).
-        max_depth: Max hierarchy levels to traverse (1-10). Default: 1.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        result = search.search_hierarchy(parent_uid, child_uid, page_title_uid, max_depth)
-        # Formatting includes depth info
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_search_hierarchy tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_find_pages_modified_today(max_num_pages: int = 50) -> str:
-    """Get a list of page titles that have been modified since midnight today.
-
-    Args:
-        max_num_pages: Max number of page titles to return. Default: 50.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        result = search.find_pages_modified_today(max_num_pages)
-        if result["success"]:
-            pages = result.get("pages", [])
-            message = result.get("message", f"Found {len(pages)} pages.")
-            if not pages: return message
-            output = message + "\n\n" + "\n".join([f"- {title}" for title in pages])
-            return output
+            for match in result["matches"]:
+                page_info = f" (in page: {match['page_title']})" if "page_title" in match else ""
+                formatted += f"- {match['content']}{page_info}\n"
+            
+            return formatted
         else:
-             return f"Error finding modified pages: {result.get('message', 'Unknown error')}"
-    except Exception as e:
-        logger.error(f"Error in roam_find_pages_modified_today tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_search_by_text(text: str, page_title_uid: Optional[str] = None) -> str:
-    """Search for blocks containing specific text. Default is case-sensitive (like Roam).
-
-    Args:
-        text: The text string to search for within block content.
-        page_title_uid: Optional: Title or UID of a page to limit scope.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        if not text or not isinstance(text, str):
-             raise ValidationError("Search text must be provided as a non-empty string.", "text")
-             
-        # Using case_sensitive=True by default, matching TS behavior and likely Roam's default
-        result = search.search_by_text(text, page_title_uid, case_sensitive=True)
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_search_by_text tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_update_block(block_uid: str, content: Optional[str] = None, 
-                          transform_pattern: Optional[Dict[str, Any]] = None) -> str:
-    """Update a single block's content. Use 'content' to replace, or 'transform_pattern' to modify with regex.
-
-    Args:
-        block_uid: The 9-character UID of the block to update.
-        content: Optional: The new string content for the block. Replaces existing content.
-        transform_pattern: Optional: Modify existing content. Dict with {'find': 'regex', 'replace': 'string', 'global'?: bool (default True)}.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        # Validation is handled within update_content
-        result = content_ops.update_content(block_uid, content, transform_pattern)
+            return f"Error searching for tag: {result.get('message', 'Unknown error')}"
+    
+    def search_by_status(self, schema: SearchStatusSchema) -> str:
+        """
+        Search for blocks with a specific status (TODO/DONE).
+        
+        Args:
+            schema: Validated status search parameters
+        """
+        result = search_ops.search_by_status(schema.status, schema.page_title_uid, schema.include, schema.exclude)
         if result["success"]:
-            final_content = result.get('content', '[Content Unavailable]')
-            # Limit length for response message
-            display_content = final_content[:200] + ('...' if len(final_content) > 200 else '')
-            return f"Block {block_uid} updated successfully. New content:\n{display_content}"
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for match in result["matches"]:
+                page_info = f" (in page: {match['page_title']})" if "page_title" in match else ""
+                formatted += f"- {match['content']}{page_info}\n"
+            
+            return formatted
         else:
-            return f"Error updating block {block_uid}: {result.get('error', 'Unknown error')}"
-    except Exception as e:
-        logger.error(f"Error in roam_update_block tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_update_multiple_blocks(updates: List[Dict[str, Any]]) -> str:
-    """Update multiple blocks efficiently in batches. Each item needs 'block_uid' and either 'content' or 'transform'.
-
-    Args:
-        updates: List of update operations. Ex: [{"block_uid": "...", "content": "New"}, {"block_uid": "...", "transform": {"find": "old", "replace": "new"}}].
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        result = content_ops.update_multiple_contents(updates)
+            return f"Error searching by status: {result.get('message', 'Unknown error')}"
+    
+    def search_block_refs(self, schema: SearchBlockRefsSchema) -> str:
+        """
+        Search for block references.
         
-        # Provide a summary message and maybe details of failures
-        message = result.get("message", "Batch update process finished.")
-        if not result.get("success", True): # If overall success is false
-             failed_updates = [res for res in result.get("results", []) if not res.get("success")]
-             if failed_updates:
-                  message += f" Failures occurred: {len(failed_updates)} blocks failed to update."
-                  # Optionally list first few errors
-                  errors_preview = [f"UID {f.get('block_uid', 'N/A')}: {f.get('error', 'Unknown')}" for f in failed_updates[:3]]
-                  message += " First few errors: " + "; ".join(errors_preview)
-                  
-        return message # Return summary message
-        # Alternatively, return JSON string of full results if needed
-        # return json.dumps(result, indent=2)
-        
-    except Exception as e:
-        logger.error(f"Error in roam_update_multiple_blocks tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_search_by_date(start_date: str, end_date: Optional[str] = None,
-                            type_filter: str = "created", scope: str = "blocks",
-                            include_content: bool = True) -> str:
-    """Search for blocks or pages by creation or modification date range (YYYY-MM-DD format).
-
-    Args:
-        start_date: Start date (YYYY-MM-DD). Required.
-        end_date: Optional end date (YYYY-MM-DD). Defaults to today.
-        type_filter: Filter by 'created', 'modified', or 'both'. Default: 'created'.
-        scope: Search 'blocks', 'pages', or 'both'. Default: 'blocks'.
-        include_content: Include block content or page title in results. Default: True.
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        # Validation is done within search_by_date
-        result = search.search_by_date(start_date, end_date, type_filter, scope, include_content)
-        # Formatting includes type and time info
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_search_by_date tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-# --- Memory Tools ---
-
-@mcp.tool()
-async def roam_remember(memory: str, categories: Optional[List[str]] = None) -> str:
-    """Store a memory or piece of information on today's daily page, tagged with a configured memory tag (default #[[Memories]]).
-
-    Args:
-        memory: The text content of the memory to store.
-        categories: Optional list of category strings to add as additional tags (e.g., ["Work", "Project Alpha"]).
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        if not memory or not isinstance(memory, str):
-             raise ValidationError("Memory text must be provided as a non-empty string.", "memory")
-             
-        result = memory_ops.remember(memory, categories) # Use module function
-        
+        Args:
+            schema: Validated block reference search parameters
+        """
+        result = search_ops.search_block_refs(schema.block_uid, schema.page_title_uid)
         if result["success"]:
-            content = result.get('content', '[Content Unavailable]')
-            display_content = content[:200] + ('...' if len(content) > 200 else '')
-            return f"Memory stored successfully with UID {result.get('block_uid', 'N/A')}. Content:\n{display_content}"
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for match in result["matches"]:
+                page_info = f" (in page: {match['page_title']})" if "page_title" in match else ""
+                formatted += f"- {match['content']}{page_info}\n"
+            
+            return formatted
+        else:
+            return f"Error searching block references: {result.get('message', 'Unknown error')}"
+    
+    def search_hierarchy(self, schema: SearchHierarchySchema) -> str:
+        """
+        Search for parent or child blocks in the block hierarchy.
+        
+        Args:
+            schema: Validated hierarchy search parameters
+        """
+        result = search_ops.search_hierarchy(schema.parent_uid, schema.child_uid, schema.page_title_uid, schema.max_depth)
+        if result["success"]:
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for match in result["matches"]:
+                page_info = f" (in page: {match['page_title']})" if "page_title" in match else ""
+                depth_info = f" (depth: {match['depth']})"
+                formatted += f"- {match['content']}{page_info}{depth_info}\n"
+            
+            return formatted
+        else:
+            return f"Error searching hierarchy: {result.get('message', 'Unknown error')}"
+    
+    def find_pages_modified_today(self, max_num_pages: int = 50) -> str:
+        """
+        Find pages that have been modified today.
+        
+        Args:
+            max_num_pages: Max number of pages to retrieve
+        """
+        result = search_ops.find_pages_modified_today(max_num_pages)
+        if result["success"]:
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for page in result["pages"]:
+                formatted += f"- {page}\n"
+            
+            return formatted
+        else:
+            return f"Error finding modified pages: {result.get('message', 'Unknown error')}"
+    
+    def search_by_text(self, schema: SearchTextSchema) -> str:
+        """
+        Search for blocks containing specific text.
+        
+        Args:
+            schema: Validated text search parameters
+        """
+        result = search_ops.search_by_text(schema.text, schema.page_title_uid)
+        if result["success"]:
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for match in result["matches"]:
+                page_info = f" (in page: {match['page_title']})" if "page_title" in match else ""
+                formatted += f"- {match['content']}{page_info}\n"
+            
+            return formatted
+        else:
+            return f"Error searching by text: {result.get('message', 'Unknown error')}"
+    
+    def update_block(self, schema: UpdateBlockSchema) -> str:
+        """
+        Update a single block.
+        
+        Args:
+            schema: Validated block update parameters
+        """
+        result = content_ops.update_content(schema.block_uid, schema.content, schema.transform_pattern)
+        if result["success"]:
+            return f"Block updated successfully: {result['content']}"
+        else:
+            return f"Error updating block: {result.get('error', 'Unknown error')}"
+    
+    def update_multiple_blocks(self, schema: UpdateMultipleSchema) -> str:
+        """
+        Update multiple blocks in a single operation.
+        
+        Args:
+            schema: Validated multiple block update parameters
+        """
+        result = content_ops.update_multiple_contents(schema.updates)
+        if result["success"]:
+            successful = sum(1 for r in result["results"] if r.get("success"))
+            return f"Updated {successful}/{len(schema.updates)} blocks successfully"
+        else:
+            return f"Error updating blocks: {result.get('error', 'Unknown error')}"
+    
+    def search_by_date(self, schema: SearchDateSchema) -> str:
+        """
+        Search for blocks or pages based on creation or modification dates.
+        
+        Args:
+            schema: Validated date search parameters
+        """
+        result = search_ops.search_by_date(
+            schema.start_date, 
+            schema.end_date,
+            schema.type_filter, 
+            schema.scope,
+            schema.include_content
+        )
+        if result["success"]:
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for match in result["matches"]:
+                date_info = datetime.fromtimestamp(match["time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                
+                if match["type"] == "block":
+                    page_info = f" (in page: {match.get('page_title', 'Unknown')})"
+                    content_info = f": {match.get('content', '')}" if schema.include_content else ""
+                    formatted += f"- Block {match['uid']} {date_info}{page_info}{content_info}\n"
+                else:  # page
+                    title_info = f" (title: {match.get('title', 'Unknown')})"
+                    content_info = f": {match.get('content', '')}" if schema.include_content else ""
+                    formatted += f"- Page {match['uid']} {date_info}{title_info}{content_info}\n"
+            
+            return formatted
+        else:
+            return f"Error searching by date: {result.get('message', 'Unknown error')}"
+    
+    def remember(self, schema: RememberSchema) -> str:
+        """
+        Add a memory to remember.
+        
+        Args:
+            schema: Validated memory parameters
+        """
+        result = memory_ops.remember(schema.memory, schema.categories)
+        if result["success"]:
+            return f"Memory stored successfully: {result['content']}"
         else:
             return f"Error storing memory: {result.get('error', 'Unknown error')}"
-            
-    except Exception as e:
-        logger.error(f"Error in roam_remember tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def roam_recall(sort_by: str = "newest", filter_tag: Optional[str] = None) -> str:
-    """Retrieve stored memories. Searches blocks with the memory tag AND blocks on the dedicated memory page. Deduplicates results.
-
-    Args:
-        sort_by: Sort order: "newest" or "oldest" (by creation time). Default: "newest".
-        filter_tag: Optional: Only include memories that also contain this tag (text search within memory block).
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        if sort_by not in ["newest", "oldest"]:
-             raise ValidationError("sort_by must be 'newest' or 'oldest'.", "sort_by")
-             
-        result = memory_ops.recall(sort_by, filter_tag) # Use module function
+    
+    def recall(self, schema: RecallSchema) -> str:
+        """
+        Retrieve stored memories.
         
+        Args:
+            schema: Validated recall parameters
+        """
+        result = memory_ops.recall(schema.sort_by, schema.filter_tag)
         if result["success"]:
-             memories = result.get("memories", [])
-             message = result.get("message", f"Found {len(memories)} memories.")
-             if not memories: return message
-             
-             # Format output list
-             output = message + "\n\n" + "\n".join([f"- {mem}" for mem in memories])
-             # Limit total length?
-             MAX_LEN = 8000 # Example limit
-             if len(output) > MAX_LEN:
-                  output = output[:MAX_LEN] + "\n... (truncated)"
-             return output
+            # Format the results
+            formatted = f"{result['message']}\n\n"
+            
+            for memory in result["memories"]:
+                formatted += f"- {memory}\n"
+            
+            return formatted
         else:
             return f"Error recalling memories: {result.get('error', 'Unknown error')}"
+    
+    def datomic_query(self, schema: DatomicQuerySchema) -> str:
+        """
+        Execute a custom Datomic query.
+        
+        Args:
+            schema: Validated Datomic query parameters
+        """
+        result = search_ops.execute_datomic_query(schema.query, schema.inputs)
+        if result["success"]:
+            # Format the results
+            formatted = f"{result['message']}\n\n"
             
-    except Exception as e:
-        logger.error(f"Error in roam_recall tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-# --- Other Tools ---
-
-@mcp.tool()
-async def roam_datomic_query(query: str, inputs: Optional[List[Any]] = None) -> str:
-    """Execute a custom Datalog query against the Roam graph. Use with caution for advanced data retrieval.
-
-    Args:
-        query: The Datalog query string (e.g., "[:find ?title :where [?p :node/title ?title]]").
-        inputs: Optional list of input parameters for parameterized queries (e.g., ["My Page Title"]).
-    """
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-    try:
-        if not query or not isinstance(query, str):
-             raise ValidationError("Datalog query must be provided as a non-empty string.", "query")
-             
-        result = search.execute_datomic_query(query, inputs) # Use module function
-        # Format results
-        return _format_search_results(result)
-    except Exception as e:
-        logger.error(f"Error in roam_datomic_query tool: {str(e)}", exc_info=True)
-        return format_error_response(e)
-
-
-@mcp.tool()
-async def get_youtube_transcript(url: str) -> str:
-    """Fetch and return the transcript of a YouTube video using its URL.
-
-    Args:
-        url: The full URL of the YouTube video (e.g., "https://www.youtube.com/watch?v=dQw4w9WgXcQ").
-    """
-    # No Roam environment needed for this tool
-    logger.info(f"Fetching transcript for YouTube URL: {url}")
-    video_id = extract_youtube_video_id(url)
-    if not video_id:
-        return "Invalid YouTube URL provided. Could not extract video ID."
-
-    try:
-        # Prioritize manually created English transcripts
-        preferred_langs = ['en', 'en-US', 'en-GB']
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        transcript = None
-        try:
-             # Try finding manual transcript in preferred languages
-             transcript = transcript_list.find_manually_created_transcript(preferred_langs)
-             logger.debug(f"Found manual transcript in {transcript.language}")
-        except YouTubeTranscriptApi.NoTranscriptFound:
-             logger.debug("No manual English transcript found. Trying generated...")
-             try:
-                  # Try finding generated transcript in preferred languages
-                  transcript = transcript_list.find_generated_transcript(preferred_langs)
-                  logger.debug(f"Found generated transcript in {transcript.language}")
-             except YouTubeTranscriptApi.NoTranscriptFound:
-                  logger.warning(f"No English transcript (manual or generated) found for video {video_id}. Trying any language.")
-                  # Fallback: Try fetching *any* available transcript
-                  try:
-                       # Get the first available transcript regardless of language
-                       transcript = next(iter(transcript_list))
-                       logger.debug(f"Found transcript in language: {transcript.language}")
-                  except StopIteration:
-                        return f"No transcripts available for this video (ID: {video_id})."
-
-        # Fetch and format the transcript
-        if transcript:
-            transcript_data = transcript.fetch()
-            full_text = " ".join([line["text"] for line in transcript_data])
-            logger.info(f"Successfully fetched transcript for video {video_id} ({transcript.language}). Length: {len(full_text)}")
-            # Limit length? Transcripts can be very long.
-            MAX_TRANSCRIPT_LEN = 15000 # Example limit
-            if len(full_text) > MAX_TRANSCRIPT_LEN:
-                 full_text = full_text[:MAX_TRANSCRIPT_LEN] + "... (Transcript truncated)"
-            return full_text
+            for match in result["matches"]:
+                formatted += f"- {match['content']}\n"
+            
+            return formatted
         else:
-             # Should have been caught by inner exceptions, but safety net.
-             return f"Could not find any transcript for video {video_id}."
-
-    except TranscriptsDisabled:
-        logger.warning(f"Transcripts disabled for video {video_id}.")
-        return "Transcripts are disabled for this video."
-    except Exception as e:
-        logger.error(f"Error fetching YouTube transcript for {url}: {str(e)}", exc_info=True)
-        return f"An error occurred while fetching the transcript: {str(e)}"
-
-
-@mcp.tool()
-async def get_roam_graph_info() -> str:
-    """Get basic information about the configured Roam Research graph (name, page/block counts)."""
-    if not validate_environment_and_log():
-        return "Configuration Error: Required Roam credentials missing."
-        
-    client = get_client() # Get client instance
+            return f"Error executing query: {result.get('message', 'Unknown error')}"
     
-    try:
-        page_count = "Error"
-        block_count = "Error"
-
-        # Get page count
-        try:
-            query_page = "[:find (count ?p) . :where [?p :node/title]]" # Added '.' for scalar result
-            count_result = client.query(query_page)
-            if isinstance(count_result, int): page_count = str(count_result)
-            else: logger.warning(f"Unexpected page count result type: {type(count_result)}")
-        except QueryError as e:
-             logger.error(f"Failed to get page count: {e}")
-
-        # Get block count
-        try:
-            query_block = "[:find (count ?b) . :where [?b :block/string]]" # Added '.' for scalar result
-            count_result = client.query(query_block)
-            if isinstance(count_result, int): block_count = str(count_result)
-            else: logger.warning(f"Unexpected block count result type: {type(count_result)}")
-        except QueryError as e:
-             logger.error(f"Failed to get block count: {e}")
+    def get_youtube_transcript(self, schema: YouTubeTranscriptSchema) -> str:
+        """
+        Fetch the transcript of a YouTube video.
         
-        # Format output
-        graph_name = client.graph_name # Get from client instance
-        memory_tag = get_memories_tag()
-        
-        output = f"""--- Roam Graph Info ---
-Graph Name: {graph_name}
-Page Count: {page_count}
-Block Count: {block_count}
+        Args:
+            schema: Validated YouTube transcript parameters
+        """
+        video_id = extract_youtube_video_id(schema.url)
+        if not video_id:
+            return "Invalid YouTube URL. Unable to extract video ID."
+
+        try:
+            # Define the prioritized list of language codes
+            languages = [
+                'en', 'en-US', 'en-GB', 'de', 'es', 'hi', 'zh', 'ar', 'bn', 'pt',
+                'ru', 'ja', 'pa'
+            ]
+
+            # Attempt to retrieve the available transcripts
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+            # Try to find a transcript in the prioritized languages
+            for language in languages:
+                try:
+                    transcript = transcript_list.find_transcript([language])
+                    # Check if the transcript is manually created or generated, prefer manually created
+                    if transcript.is_generated:
+                        continue
+                    text = " ".join([line["text"] for line in transcript.fetch()])
+                    return text
+                except Exception:
+                    continue
+
+            # If no suitable transcript is found in the specified languages, try to fetch a generated transcript
+            try:
+                generated_transcript = transcript_list.find_generated_transcript(
+                    languages)
+                text = " ".join(
+                    [line["text"] for line in generated_transcript.fetch()])
+                return text
+            except Exception:
+                return "No suitable transcript found for this video."
+
+        except TranscriptsDisabled:
+            return "Transcripts are disabled for this video."
+        except Exception as e:
+            logging.error(f"Error fetching YouTube transcript: {str(e)}", exc_info=True)
+            return f"An error occurred while fetching the transcript: {str(e)}"
+    
+    def get_roam_graph_info(self) -> str:
+        """Get information about the Roam Research graph."""
+        try:
+            # Get page count
+            query = """[:find (count ?p)
+                        :where [?p :node/title]]"""
+            
+            result = search_ops.execute_datomic_query(query)
+            
+            if result["success"] and result["matches"]:
+                page_count = result["matches"][0]["content"]
+            else:
+                page_count = "Unknown"
+            
+            # Get block count
+            query = """[:find (count ?b)
+                        :where [?b :block/string]]"""
+            
+            result = search_ops.execute_datomic_query(query)
+            
+            if result["success"] and result["matches"]:
+                block_count = result["matches"][0]["content"]
+            else:
+                block_count = "Unknown"
+            
+            # Format the output
+            memory_tag = MEMORIES_TAG if MEMORIES_TAG else "Not set (using default #[[Memories]])"
+            
+            formatted_info = f"""
+Graph Name: {GRAPH_NAME}
+Pages: {page_count}
+Blocks: {block_count}
+API Access: Enabled
 Memory Tag: {memory_tag}
------------------------"""
-        return output
+"""
+            
+            return formatted_info
+        except Exception as e:
+            logging.error(f"Error retrieving graph information: {str(e)}", exc_info=True)
+            return f"Error retrieving graph information: {str(e)}"
+    
+    def summarize_page(self, schema: SummarizePageSchema) -> dict:
+        """
+        Create a prompt to summarize a page in Roam Research.
         
-    except Exception as e:
-        logger.error(f"Error retrieving graph information: {str(e)}", exc_info=True)
-        return format_error_response(e)
+        Args:
+            schema: Validated page summarization parameters
+        """
+        try:
+            from roam_mcp.api import get_page_content
+            content = get_page_content(schema.page_title)
+            
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": f"Please provide a concise summary of the following page content from my Roam Research database:\n\n{content}"
+                }]
+            }
+        except Exception as e:
+            logging.error(f"Error creating summary prompt: {str(e)}", exc_info=True)
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": f"I wanted to summarize my Roam page titled '{schema.page_title}', but there was an error retrieving the content: {str(e)}. Can you help me troubleshoot this issue with my Roam Research integration?"
+                }]
+            }
 
 
-# --- MCP Prompts ---
+def format_error_response(error: Exception) -> str:
+    """Format an error for user-friendly display."""
+    if isinstance(error, ValidationError):
+        return f"Validation error: {str(error)}"
+    elif isinstance(error, PageNotFoundError):
+        return f"Page not found: {str(error)}"
+    elif isinstance(error, BlockNotFoundError):
+        return f"Block not found: {str(error)}"
+    elif isinstance(error, QueryError):
+        return f"Query error: {str(error)}"
+    elif isinstance(error, TransactionError):
+        return f"Transaction error: {str(error)}"
+    elif isinstance(error, AuthenticationError):
+        return f"Authentication error: {str(error)}"
+    elif isinstance(error, RateLimitError):
+        return f"Rate limit exceeded: {str(error)}"
+    elif isinstance(error, PydanticValidationError):
+        return f"Invalid input: {str(error)}"
+    else:
+        return f"Error: {str(error)}"
 
-@mcp.prompt()
-async def summarize_page(page_title: str) -> dict:
-    """Generates a prompt asking the AI to summarize a specific Roam page's content.
 
-    Args:
-        page_title: The title of the Roam page to summarize.
-    """
-    if not validate_environment_and_log():
-        # Return an error message within the prompt structure
-        return {
-            "messages": [{
-                "role": "user",
-                "content": "Configuration Error: Cannot summarize Roam page because ROAM_API_TOKEN and ROAM_GRAPH_NAME are not set correctly. Please check the server configuration."
-            }]
-        }
+def validate_environment():
+    """Validate that required environment variables are set."""
+    if not API_TOKEN or not GRAPH_NAME:
+        missing = []
+        if not API_TOKEN:
+            missing.append("ROAM_API_TOKEN")
+        if not GRAPH_NAME:
+            missing.append("ROAM_GRAPH_NAME")
+            
+        error_msg = f"""
+Missing required environment variables: {', '.join(missing)}
+
+Please configure these variables either:
+1. In your MCP settings file:
+   - For Claude: ~/Library/Application Support/Claude/claude_desktop_config.json
+   - For Cline: ~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json
+
+   Example configuration:
+   {{
+     "mcpServers": {{
+       "roam-helper": {{
+         "command": "uvx",
+         "args": ["git+https://github.com/PhiloSolares/roam-mcp.git"],
+         "env": {{
+           "ROAM_API_TOKEN": "your-api-token",
+           "ROAM_GRAPH_NAME": "your-graph-name"
+         }}
+       }}
+     }}
+   }}
+
+2. Or in a .env file in the roam-mcp directory:
+   ROAM_API_TOKEN=your-api-token
+   ROAM_GRAPH_NAME=your-graph-name
+"""
+        logging.error(error_msg)
+        return False
     
-    try:
-        # Fetch the page content using the helper
-        page_content = get_page_content(page_title.strip())
+    return True
+
+
+def setup_logging(verbose=False, log_level=logging.INFO, log_file=None):
+    """Configure logging with appropriate level of detail."""
+    # Set log level based on verbose flag
+    if verbose and log_level > logging.DEBUG:
+        log_level = logging.DEBUG
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Clear any existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Add appropriate handler
+    if log_file:
+        # File handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+    else:
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+
+
+def run_server(transport="stdio", port=None, verbose=False, log_level=logging.INFO, log_file=None):
+    """Run the MCP server with the specified transport."""
+    # Configure logging
+    setup_logging(verbose, log_level, log_file)
+    
+    # Create server instance
+    mcp = FastMCP("roam-research")
+    
+    # Create tool handler
+    tool_handler = RoamToolHandler()
+    
+    # Log server information
+    logging.info("Roam MCP Server starting...")
+    
+    # Validate environment variables
+    valid_env = validate_environment()
+    if valid_env:
+        logging.info(f"API token and graph name are set")
+        logging.info(f"MEMORIES_TAG is set to: {MEMORIES_TAG}")
+    else:
+        logging.warning("Missing required environment variables")
+    
+    # ===== Tool Registrations ===== #
+    
+    @mcp.tool()
+    async def search_roam(search_terms: List[str]) -> str:
+        """Search Roam database for content containing the specified terms.
+
+        Args:
+            search_terms: List of keywords to search for
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
         
-        # Create the prompt for the AI
-        return {
-            "messages": [{
-                "role": "user",
-                "content": f"Please provide a concise summary of the following content from my Roam Research page titled '{page_title}':\n\n```markdown\n{page_content}\n```"
-            }]
-        }
-    except PageNotFoundError as e:
-         logger.warning(f"Page not found for summary prompt: {page_title}")
-         return {
-             "messages": [{
-                 "role": "user",
-                 "content": f"I asked to summarize my Roam page titled '{page_title}', but the page could not be found. Please double-check the title or confirm the page exists."
-             }]
-         }
-    except Exception as e:
-        # Generic error message if fetching content fails
-        logger.error(f"Error creating summary prompt for page '{page_title}': {str(e)}", exc_info=True)
-        error_info = format_error_response(e)
-        return {
-            "messages": [{
-                "role": "user",
-                "content": f"I wanted to summarize my Roam page titled '{page_title}', but an error occurred while retrieving the content:\n\n{error_info}\n\nCan you help me understand this error or suggest how to fix my Roam integration?"
-            }]
-        }
+        try:
+            return tool_handler.search_roam(search_terms)
+        except Exception as e:
+            logging.error(f"Error searching Roam: {str(e)}", exc_info=True)
+            return format_error_response(e)
 
+    @mcp.tool()
+    async def roam_fetch_page_by_title(title: str) -> str:
+        """Retrieve complete page contents by exact title, including all nested blocks and resolved block references.
 
-# --- Server Runner ---
+        Args:
+            title: Title of the page
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            return tool_handler.fetch_page_by_title(title)
+        except Exception as e:
+            logging.error(f"Error fetching page: {str(e)}", exc_info=True)
+            return format_error_response(e)
 
-def run_server(transport="stdio", port=None, verbose=False):
-    """Configure logging, validate environment, and run the MCP server."""
-    setup_logging(verbose)
-    logger.info("--- Starting Roam MCP Server ---")
+    @mcp.tool()
+    async def roam_create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> str:
+        """Create a new page in Roam Research with optional content using explicit nesting levels.
+
+        Args:
+            title: Title of the new page
+            content: Initial content for the page as an array of blocks with explicit nesting levels
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = CreatePageSchema(title=title, content=content)
+            return tool_handler.create_page(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error creating page: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_create_block(content: str, page_uid: Optional[str] = None, title: Optional[str] = None) -> str:
+        """Add a new block to an existing Roam page. If no page specified, adds to today's daily note.
+
+        Args:
+            content: Content of the block
+            page_uid: Optional: UID of the page to add block to
+            title: Optional: Title of the page to add block to
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = CreateBlockSchema(content=content, page_uid=page_uid, title=title)
+            return tool_handler.create_block(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error creating block: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] = None, block_text_uid: Optional[str] = None) -> str:
+        """Add a structured outline to an existing page or block with customizable nesting levels.
+
+        Args:
+            outline: Array of outline items with block text and explicit nesting level
+            page_title_uid: Title or UID of the page. Leave blank to use the default daily page
+            block_text_uid: A title heading for the outline or the UID of the block under which content will be nested
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = CreateOutlineSchema(outline=outline, page_title_uid=page_title_uid, block_text_uid=block_text_uid)
+            return tool_handler.create_outline(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error creating outline: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_import_markdown(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None,
+                                parent_uid: Optional[str] = None, parent_string: Optional[str] = None, 
+                                order: str = "last") -> str:
+        """Import nested markdown content into Roam under a specific block.
+
+        Args:
+            content: Nested markdown content to import
+            page_uid: Optional: UID of the page containing the parent block
+            page_title: Optional: Title of the page containing the parent block
+            parent_uid: Optional: UID of the parent block to add content under
+            parent_string: Optional: Exact string content of the parent block to add content under
+            order: Optional: Where to add the content under the parent ("first" or "last")
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = ImportMarkdownSchema(
+                content=content,
+                page_uid=page_uid,
+                page_title=page_title,
+                parent_uid=parent_uid,
+                parent_string=parent_string,
+                order=order
+            )
+            return tool_handler.import_markdown(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error importing markdown: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_add_todo(todos: List[str]) -> str:
+        """Add a list of todo items as individual blocks to today's daily page in Roam.
+
+        Args:
+            todos: List of todo items to add
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = AddTodoSchema(todos=todos)
+            return tool_handler.add_todos(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error adding todos: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_search_for_tag(primary_tag: str, page_title_uid: Optional[str] = None, near_tag: Optional[str] = None) -> str:
+        """Search for blocks containing a specific tag and optionally filter by blocks that also contain another tag nearby.
+
+        Args:
+            primary_tag: The main tag to search for (without the [[ ]] brackets)
+            page_title_uid: Optional: Title or UID of the page to search in
+            near_tag: Optional: Another tag to filter results by - will only return blocks where both tags appear
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = SearchTagSchema(primary_tag=primary_tag, page_title_uid=page_title_uid, near_tag=near_tag)
+            return tool_handler.search_for_tag(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error searching for tag: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_search_by_status(status: str, page_title_uid: Optional[str] = None, 
+                                  include: Optional[str] = None, exclude: Optional[str] = None) -> str:
+        """Search for blocks with a specific status (TODO/DONE) across all pages or within a specific page.
+
+        Args:
+            status: Status to search for (TODO or DONE)
+            page_title_uid: Optional: Title or UID of the page to search in
+            include: Optional: Comma-separated list of terms to filter results by inclusion
+            exclude: Optional: Comma-separated list of terms to filter results by exclusion
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = SearchStatusSchema(status=status, page_title_uid=page_title_uid, include=include, exclude=exclude)
+            return tool_handler.search_by_status(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error searching by status: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_search_block_refs(block_uid: Optional[str] = None, page_title_uid: Optional[str] = None) -> str:
+        """Search for block references within a page or across the entire graph.
+
+        Args:
+            block_uid: Optional: UID of the block to find references to
+            page_title_uid: Optional: Title or UID of the page to search in
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = SearchBlockRefsSchema(block_uid=block_uid, page_title_uid=page_title_uid)
+            return tool_handler.search_block_refs(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error searching block references: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_search_hierarchy(parent_uid: Optional[str] = None, child_uid: Optional[str] = None,
+                                  page_title_uid: Optional[str] = None, max_depth: int = 1) -> str:
+        """Search for parent or child blocks in the block hierarchy.
+
+        Args:
+            parent_uid: Optional: UID of the block to find children of
+            child_uid: Optional: UID of the block to find parents of
+            page_title_uid: Optional: Title or UID of the page to search in
+            max_depth: Optional: How many levels deep to search (default: 1)
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = SearchHierarchySchema(
+                parent_uid=parent_uid,
+                child_uid=child_uid,
+                page_title_uid=page_title_uid,
+                max_depth=max_depth
+            )
+            return tool_handler.search_hierarchy(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error searching hierarchy: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_find_pages_modified_today(max_num_pages: int = 50) -> str:
+        """Find pages that have been modified today (since midnight).
+
+        Args:
+            max_num_pages: Max number of pages to retrieve (default: 50)
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            return tool_handler.find_pages_modified_today(max_num_pages)
+        except Exception as e:
+            logging.error(f"Error finding modified pages: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_search_by_text(text: str, page_title_uid: Optional[str] = None) -> str:
+        """Search for blocks containing specific text across all pages or within a specific page.
+
+        Args:
+            text: The text to search for
+            page_title_uid: Optional: Title or UID of the page to search in
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = SearchTextSchema(text=text, page_title_uid=page_title_uid)
+            return tool_handler.search_by_text(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error searching by text: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_update_block(block_uid: str, content: Optional[str] = None, 
+                              transform_pattern: Optional[Dict[str, Any]] = None) -> str:
+        """Update a single block identified by its UID.
+
+        Args:
+            block_uid: UID of the block to update
+            content: New content for the block
+            transform_pattern: Pattern to transform the current content
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = UpdateBlockSchema(block_uid=block_uid, content=content, transform_pattern=transform_pattern)
+            return tool_handler.update_block(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error updating block: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_update_multiple_blocks(updates: List[Dict[str, Any]]) -> str:
+        """Efficiently update multiple blocks in a single batch operation.
+
+        Args:
+            updates: Array of block updates to perform
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = UpdateMultipleSchema(updates=updates)
+            return tool_handler.update_multiple_blocks(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error updating blocks: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_search_by_date(start_date: str, end_date: Optional[str] = None,
+                                type_filter: str = "created", scope: str = "blocks",
+                                include_content: bool = True) -> str:
+        """Search for blocks or pages based on creation or modification dates.
+
+        Args:
+            start_date: Start date in ISO format (YYYY-MM-DD)
+            end_date: Optional: End date in ISO format (YYYY-MM-DD)
+            type_filter: Whether to search by "created", "modified", or "both"
+            scope: Whether to search "blocks", "pages", or "both"
+            include_content: Whether to include the content of matching blocks/pages
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = SearchDateSchema(
+                start_date=start_date,
+                end_date=end_date,
+                type_filter=type_filter,
+                scope=scope,
+                include_content=include_content
+            )
+            return tool_handler.search_by_date(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error searching by date: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_remember(memory: str, categories: Optional[List[str]] = None) -> str:
+        """Add a memory or piece of information to remember, stored on the daily page with tag.
+
+        Args:
+            memory: The memory detail or information to remember
+            categories: Optional categories to tag the memory with
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = RememberSchema(memory=memory, categories=categories)
+            return tool_handler.remember(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error storing memory: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_recall(sort_by: str = "newest", filter_tag: Optional[str] = None) -> str:
+        """Retrieve stored memories, optionally filtered by tag and sorted by creation date.
+
+        Args:
+            sort_by: Sort order for memories based on creation date
+            filter_tag: Include only memories with a specific filter tag
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = RecallSchema(sort_by=sort_by, filter_tag=filter_tag)
+            return tool_handler.recall(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error recalling memories: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def roam_datomic_query(query: str, inputs: Optional[List[Any]] = None) -> str:
+        """Execute a custom Datomic query on the Roam graph beyond the available search tools.
+
+        Args:
+            query: The Datomic query to execute (in Datalog syntax)
+            inputs: Optional array of input parameters for the query
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            # Validate with schema
+            schema = DatomicQuerySchema(query=query, inputs=inputs)
+            return tool_handler.datomic_query(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error executing query: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def get_youtube_transcript(url: str) -> str:
+        """Fetch and return the transcript of a YouTube video.
+
+        Args:
+            url: URL of the YouTube video
+        """
+        try:
+            # Validate with schema
+            schema = YouTubeTranscriptSchema(url=url)
+            return tool_handler.get_youtube_transcript(schema)
+        except PydanticValidationError as e:
+            return f"Invalid input: {str(e)}"
+        except Exception as e:
+            logging.error(f"Error fetching YouTube transcript: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.tool()
+    async def get_roam_graph_info() -> str:
+        """Get information about your Roam Research graph.
+        """
+        if not valid_env:
+            return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+        
+        try:
+            return tool_handler.get_roam_graph_info()
+        except Exception as e:
+            logging.error(f"Error retrieving graph information: {str(e)}", exc_info=True)
+            return format_error_response(e)
+
+    @mcp.prompt()
+    async def summarize_page(page_title: str) -> dict:
+        """
+        Create a prompt to summarize a page in Roam Research.
+
+        Args:
+            page_title: Title of the page to summarize
+        """
+        if not valid_env:
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+                }]
+            }
+        
+        try:
+            # Validate with schema
+            schema = SummarizePageSchema(page_title=page_title)
+            return tool_handler.summarize_page(schema)
+        except PydanticValidationError as e:
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": f"Invalid input: {str(e)}"
+                }]
+            }
+        except Exception as e:
+            logging.error(f"Error creating summary prompt: {str(e)}", exc_info=True)
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": f"Error creating summary prompt: {str(e)}"
+                }]
+            }
     
-    # Validate environment and log initial status/instructions
-    is_env_valid = validate_environment_and_log()
-    
-    # Even if env is invalid, we might still run the server to allow
-    # potentially fixing it or using non-Roam tools?
-    # For now, let's proceed but log a strong warning.
-    if not is_env_valid:
-         logger.error("!!! Environment validation failed. Roam tools will likely fail until configuration is corrected. See logs above for details. !!!")
-         # sys.exit(1) # Optionally exit immediately
-
-    # Run the FastMCP server
+    # Run the server with the specified transport
     try:
         if transport == "stdio":
-            logger.info("Starting server with STDIO transport.")
+            logging.info("Starting server with stdio transport")
             mcp.run(transport="stdio")
         elif transport == "sse":
-            port = port or 3000
-            logger.info(f"Starting server with SSE transport on port {port}.")
-            mcp.run(transport="sse", port=int(port)) # Ensure port is int
+            if not port:
+                port = 3000
+            logging.info(f"Starting server with SSE transport on port {port}")
+            mcp.run(transport="sse", port=port)
         else:
-            logger.error(f"Unsupported transport specified: '{transport}'. Use 'stdio' or 'sse'.")
+            logging.error(f"Unsupported transport: {transport}")
             sys.exit(1)
     except KeyboardInterrupt:
-        logger.info("Server stopped by user (KeyboardInterrupt).")
-        sys.exit(0)
+        logging.info("Server stopped by user")
     except Exception as e:
-        logger.critical(f"Critical error running server: {str(e)}", exc_info=True)
-        traceback.print_exc(file=sys.stderr) # Ensure traceback is visible
-        sys.exit(1)
-    finally:
-        logger.info("--- Roam MCP Server stopped ---")
+        logging.error(f"Error running server: {str(e)}")
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    # Default to stdio transport when run directly
+    run_server(transport="stdio", verbose=True)

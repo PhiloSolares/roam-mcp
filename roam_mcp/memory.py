@@ -4,195 +4,289 @@ from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import logging
 
-# Use client from api module
 from roam_mcp.api import (
-    get_client, # Import function to get client instance
-    get_daily_page,
-    add_block_to_page,
-    get_memories_tag, # Get tag via function
+    client,
+    MEMORIES_TAG,
     ValidationError,
     PageNotFoundError,
     QueryError
 )
-# Import utils needed here
-from roam_mcp.utils import (
-    format_roam_date,
-    resolve_block_references as resolve_block_references_util # Rename to avoid conflict
-)
+from roam_mcp.utils import format_roam_date
 
 # Set up logging
 logger = logging.getLogger("roam-mcp.memory")
 
 
-def remember(memory: str, categories: Optional[List[str]] = None) -> Dict[str, Any]:
-    """
-    Store a memory with the specified MEMORIES_TAG using the RoamClient.
+class MemoryOperations:
+    """Operations for memory storage and retrieval in Roam."""
     
-    Args:
-        memory: The memory text to store.
-        categories: Optional list of category strings to add as tags.
+    def __init__(self):
+        """Initialize memory operations."""
+        pass
+    
+    def remember(self, memory: str, categories: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Store a memory with the specified MEMORIES_TAG.
         
-    Returns:
-        Dictionary with success status, block UID, and final content.
-    """
-    if not memory:
-        return {"success": False, "error": "Memory cannot be empty"}
-    
-    client = get_client() # Get client instance
-    memories_tag_val = get_memories_tag() # Get the configured tag
-
-    try:
-        # Validate and normalize categories
-        normalized_categories = []
-        if categories:
-            if not all(isinstance(cat, str) for cat in categories):
-                raise ValidationError("All categories must be strings.", "categories")
+        Args:
+            memory: The memory to store
+            categories: Optional list of categories to tag the memory with
             
-            for category in categories:
-                clean_category = category.replace('#', '').replace('[[', '').replace(']]', '').strip()
-                if clean_category:
+        Returns:
+            Result with success status
+        """
+        if not memory:
+            return {
+                "success": False,
+                "error": "Memory cannot be empty"
+            }
+        
+        try:
+            # Validate and normalize categories
+            normalized_categories = []
+            if categories:
+                # Ensure all categories are strings
+                invalid_categories = [cat for cat in categories if not isinstance(cat, str)]
+                if invalid_categories:
+                    return {
+                        "success": False,
+                        "error": "All categories must be strings"
+                    }
+                
+                # Normalize category formats
+                for category in categories:
+                    category = category.strip()
+                    if not category:
+                        continue
+                    
+                    # Remove any existing tag syntax
+                    clean_category = category.replace('#', '').replace('[[', '').replace(']]', '')
+                    
+                    # Add to normalized list
                     normalized_categories.append(clean_category)
-        
-        # Get today's daily page UID (uses client internally)
-        daily_page_uid = get_daily_page()
-        
-        # Format memory content with tags
-        # Start with the main memory tag
-        formatted_memory = memories_tag_val
-        # Add the memory text itself
-        formatted_memory += f" {memory.strip()}"
-        # Add category tags
-        for category in normalized_categories:
-            # Format as Roam tag (#[[Multi Word]] or #tag)
-            tag = f"#[[{category}]]" if (" " in category or "/" in category) else f"#{category}"
-            formatted_memory += f" {tag}"
-        
-        # Create the memory block (uses client internally)
-        block_uid = add_block_to_page(daily_page_uid, formatted_memory.strip())
-        
-        logger.info(f"Stored memory with UID: {block_uid}")
-        return {
-            "success": True,
-            "block_uid": block_uid,
-            "content": formatted_memory.strip()
-        }
-        
-    except (ValidationError, PageNotFoundError, QueryError) as e: # Catch relevant errors from helpers
-        logger.error(f"Error storing memory: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e: # Catch unexpected errors
-        logger.error(f"Unexpected error storing memory: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
+            
+            # Get today's daily page
+            today = datetime.now()
+            date_str = format_roam_date(today)
+            daily_page_uid = client.find_or_create_page(date_str)
+            
+            # Format memory with tags
+            formatted_memory = MEMORIES_TAG
+            
+            # Add the memory text
+            formatted_memory += f" {memory}"
+            
+            # Add category tags
+            for category in normalized_categories:
+                # Format category as Roam tag
+                if " " in category or "/" in category:
+                    tag = f"#[[{category}]]"
+                else:
+                    tag = f"#{category}"
+                
+                formatted_memory += f" {tag}"
+            
+            # Create memory block
+            block_uid = client.add_block_to_page(daily_page_uid, formatted_memory)
+            
+            return {
+                "success": True,
+                "block_uid": block_uid,
+                "content": formatted_memory
+            }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except PageNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error storing memory: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Error storing memory: {str(e)}"
+            }
 
+    def recall(self, sort_by: str = "newest", filter_tag: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Recall stored memories, optionally filtered by tag.
+        
+        Args:
+            sort_by: Sort order ("newest" or "oldest")
+            filter_tag: Optional tag to filter memories by
+            
+        Returns:
+            List of memory contents
+        """
+        if sort_by not in ["newest", "oldest"]:
+            return {
+                "success": False,
+                "error": "sort_by must be 'newest' or 'oldest'"
+            }
+        
+        # Clean and normalize the MEMORIES_TAG for queries
+        clean_tag = MEMORIES_TAG.replace('#', '').replace('[[', '').replace(']]', '')
+        
+        # Prepare filter tag conditions if needed
+        filter_conditions = ""
+        if filter_tag:
+            # Clean and normalize filter tag
+            clean_filter = filter_tag.replace('#', '').replace('[[', '').replace(']]', '')
+            
+            # Generate filter tag variants
+            filter_variants = []
+            if " " in clean_filter or "/" in clean_filter:
+                filter_variants = [f"#{clean_filter}", f"#[[{clean_filter}]]", f"[[{clean_filter}]]"]
+            else:
+                filter_variants = [f"#{clean_filter}", f"#[[{clean_filter}]]", f"[[{clean_filter}]]"]
+            
+            # Build filter conditions
+            filter_conditions_list = []
+            for variant in filter_variants:
+                filter_conditions_list.append(f'(clojure.string/includes? ?s "{variant}")')
+            
+            if filter_conditions_list:
+                filter_conditions = f" AND (or {' '.join(filter_conditions_list)})"
+        
+        try:
+            logger.debug(f"Recalling memories with sort_by={sort_by}")
+            if filter_tag:
+                logger.debug(f"Filtering by tag: {filter_tag}")
+            
+            # Method 1: Search for blocks containing the MEMORIES_TAG across the database
+            # Generate tag variants
+            tag_variants = []
+            if " " in clean_tag or "/" in clean_tag:
+                tag_variants = [f"#{clean_tag}", f"#[[{clean_tag}]]", f"[[{clean_tag}]]"]
+            else:
+                tag_variants = [f"#{clean_tag}", f"#[[{clean_tag}]]", f"[[{clean_tag}]]"]
+            
+            # Build tag conditions
+            tag_conditions = []
+            for variant in tag_variants:
+                tag_conditions.append(f'(clojure.string/includes? ?s "{variant}")')
+            
+            tag_condition = f"(or {' '.join(tag_conditions)})"
+            
+            # Create combined condition with filter if needed
+            combined_condition = tag_condition
+            if filter_conditions:
+                combined_condition = f"(and {tag_condition}{filter_conditions})"
+            
+            # Query blocks with tag
+            tag_query = f"""[:find ?uid ?s ?time ?page-title
+                          :where
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :create/time ?time]
+                          [?b :block/page ?p]
+                          [?p :node/title ?page-title]
+                          [{combined_condition}]]"""
+            
+            tag_results = client.execute_query(tag_query)
+            
+            # Method 2: Also check for dedicated page with the clean tag name
+            page_query = f"""[:find ?uid ?s ?time
+                          :where
+                          [?p :node/title "{clean_tag}"]
+                          [?b :block/page ?p]
+                          [?b :block/string ?s]
+                          [?b :block/uid ?uid]
+                          [?b :create/time ?time]]"""
+            
+            # Add filter if needed
+            if filter_conditions:
+                page_query = f"""[:find ?uid ?s ?time
+                              :where
+                              [?p :node/title "{clean_tag}"]
+                              [?b :block/page ?p]
+                              [?b :block/string ?s]
+                              [?b :block/uid ?uid]
+                              [?b :create/time ?time]
+                              [{filter_conditions.replace('AND ', '')}]]"""
+            
+            page_results = client.execute_query(page_query)
+            
+            # Process and combine results
+            memories = []
+            
+            # Process tag results
+            for uid, content, time, page_title in tag_results:
+                # Resolve references
+                resolved_content = client.resolve_block_references(content)
+                
+                memories.append({
+                    "content": resolved_content,
+                    "time": time,
+                    "page_title": page_title,
+                    "block_uid": uid
+                })
+            
+            # Process page results
+            for uid, content, time in page_results:
+                # Resolve references
+                resolved_content = client.resolve_block_references(content)
+                
+                memories.append({
+                    "content": resolved_content,
+                    "time": time,
+                    "page_title": clean_tag,
+                    "block_uid": uid
+                })
+            
+            # Sort by time
+            memories.sort(key=lambda x: x["time"], reverse=(sort_by == "newest"))
+            
+            # Clean up content - remove the MEMORIES_TAG
+            for memory in memories:
+                content = memory["content"]
+                for variant in tag_variants:
+                    content = content.replace(variant, "")
+                memory["content"] = content.strip()
+            
+            # Remove duplicates while preserving order
+            seen_contents = set()
+            unique_memories = []
+            
+            for memory in memories:
+                content = memory["content"]
+                if content and content not in seen_contents:
+                    seen_contents.add(content)
+                    unique_memories.append(memory)
+            
+            # Return just the content strings
+            memory_contents = [memory["content"] for memory in unique_memories]
+            
+            return {
+                "success": True,
+                "memories": memory_contents,
+                "message": f"Found {len(memory_contents)} memories"
+            }
+        except QueryError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error recalling memories: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Error recalling memories: {str(e)}"
+            }
+
+
+# Create global instance
+memory_ops = MemoryOperations()
+
+# Legacy functions that delegate to the instance
+def remember(memory: str, categories: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Legacy function that delegates to the memory_ops instance."""
+    return memory_ops.remember(memory, categories)
 
 def recall(sort_by: str = "newest", filter_tag: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Recall stored memories from MEMORIES_TAG blocks or page. Uses RoamClient.
-    
-    Args:
-        sort_by: Sort order ('newest' or 'oldest').
-        filter_tag: Optional tag string to filter memories by.
-        
-    Returns:
-        Dictionary with success status and list of recalled memory contents.
-    """
-    if sort_by not in ["newest", "oldest"]:
-        return {"success": False, "error": "sort_by must be 'newest' or 'oldest'"}
-    
-    client = get_client() # Get client instance
-    memories_tag_val = get_memories_tag() # Get the configured tag
-    # Clean the main tag for use in queries and content stripping
-    clean_memories_tag = memories_tag_val.replace('#', '').replace('[[', '').replace(']]', '').strip()
-
-    # Prepare filter tag condition (Datalog fragment)
-    filter_condition_str = ""
-    clean_filter_tag = ""
-    if filter_tag:
-        clean_filter_tag = filter_tag.replace('#', '').replace('[[', '').replace(']]', '').strip()
-        if clean_filter_tag:
-             # Create variants #tag, #[[tag]], [[tag]] for matching in block string
-             filter_variants = [f"#{clean_filter_tag}", f"#[[{clean_filter_tag}]]", f"[[{clean_filter_tag}]]"]
-             conditions = [f'(clojure.string/includes? ?s "{variant}")' for variant in filter_variants]
-             filter_condition_str = f"(or {' '.join(conditions)})"
-             logger.debug(f"Filtering recall by tag: '{clean_filter_tag}' using condition: {filter_condition_str}")
-        else:
-             logger.warning("Filter tag provided but was empty after cleaning.")
-
-    # Prepare MEMORIES_TAG condition (Datalog fragment)
-    memories_tag_variants = [f"#{clean_memories_tag}", f"#[[{clean_memories_tag}]]", f"[[{clean_memories_tag}]]"]
-    memories_tag_conditions = [f'(clojure.string/includes? ?s "{variant}")' for variant in memories_tag_variants]
-    memories_tag_condition_str = f"(or {' '.join(memories_tag_conditions)})"
-
-    # Combine main tag condition and optional filter condition
-    combined_condition = memories_tag_condition_str
-    if filter_condition_str:
-        combined_condition = f"(and {memories_tag_condition_str} {filter_condition_str})"
-
-    try:
-        logger.info(f"Recalling memories (Sort: {sort_by}, Filter: {filter_tag or 'None'})")
-        
-        # 1. Query for blocks across the graph containing the MEMORIES_TAG (and filter tag if specified)
-        logger.debug("Querying tagged blocks globally...")
-        global_query = f"""[:find ?uid ?s ?time ?page-title
-                           :where [?b :block/string ?s] [?b :block/uid ?uid]
-                                  [?b :create/time ?time] [?b :block/page ?p] [?p :node/title ?page-title]
-                                  [{combined_condition}]]"""
-        global_results = client.query(global_query) or []
-
-        # 2. Query for blocks on a potential dedicated page named after the clean MEMORIES_TAG
-        logger.debug(f"Querying blocks on dedicated page '{clean_memories_tag}'...")
-        page_query_condition = filter_condition_str if filter_condition_str else "[?b :block/string ?s]" # Use filter if present, else match any block string
-        page_query = f"""[:find ?uid ?s ?time
-                         :in $ ?page_title
-                         :where [?p :node/title ?page_title] [?b :block/page ?p]
-                                [?b :block/string ?s] [?b :block/uid ?uid] [?b :create/time ?time]
-                                [{page_query_condition}]]"""
-        page_results = client.query(page_query, inputs=[clean_memories_tag]) or []
-
-        # --- Process and combine results ---
-        all_memories = []
-        
-        # Process global tag results
-        for uid, content, time, page_title in global_results:
-             # Resolve references needed before cleaning
-             resolved_content = resolve_block_references_util(client, content)
-             all_memories.append({"uid": uid, "content": resolved_content, "time": time, "source": "global_tag"})
-             
-        # Process dedicated page results
-        for uid, content, time in page_results:
-             resolved_content = resolve_block_references_util(client, content)
-             all_memories.append({"uid": uid, "content": resolved_content, "time": time, "source": "page_block"})
-             
-        logger.debug(f"Found {len(global_results)} global matches and {len(page_results)} page matches initially.")
-
-        # Sort combined list by time
-        all_memories.sort(key=lambda x: x["time"], reverse=(sort_by == "newest"))
-        
-        # Deduplicate based on resolved content and clean the content
-        unique_cleaned_memories = []
-        seen_cleaned_content = set()
-        
-        for memory_data in all_memories:
-            cleaned_content = memory_data["content"]
-            # Remove all variants of the MEMORIES_TAG from the content
-            for variant in memories_tag_variants:
-                 cleaned_content = cleaned_content.replace(variant, "")
-            cleaned_content = cleaned_content.strip() # Remove leading/trailing whitespace
-
-            if cleaned_content and cleaned_content not in seen_cleaned_content:
-                seen_cleaned_content.add(cleaned_content)
-                unique_cleaned_memories.append(cleaned_content)
-                
-        logger.info(f"Recalled {len(unique_cleaned_memories)} unique memories.")
-        return {
-            "success": True,
-            "memories": unique_cleaned_memories,
-            "message": f"Found {len(unique_cleaned_memories)} unique memories"
-        }
-        
-    except QueryError as e:
-        logger.error(f"Error recalling memories: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"Unexpected error recalling memories: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
+    """Legacy function that delegates to the memory_ops instance."""
+    return memory_ops.recall(sort_by, filter_tag)

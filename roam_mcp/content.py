@@ -5,545 +5,831 @@ from datetime import datetime
 import re
 import logging
 
-# Use client from api module
-from roam_mcp.api import (
-    get_client, # Import function to get client instance
-    find_or_create_page,
-    get_daily_page,
-    add_block_to_page,
-    update_block,
-    batch_update_blocks,
-    # execute_query, # No longer used directly
-    # execute_write_action, # No longer used directly
-    execute_batch_actions, # Still used, wraps client.write
-    ValidationError,
-    BlockNotFoundError,
-    PageNotFoundError,
-    TransactionError
-)
-# Import utils needed here
+from roam_mcp.api import client, ValidationError, BlockNotFoundError, PageNotFoundError, TransactionError
 from roam_mcp.utils import (
     format_roam_date,
     convert_to_roam_markdown,
     parse_markdown_list,
-    process_nested_content, # This now needs the client passed
-    # find_block_uid, # Now in utils, needs client
-    create_block_action
+    process_nested_content,
+    create_block_action,
+    prepare_batch_actions
 )
-# Import finders from utils
-from roam_mcp.utils import find_block_uid as find_block_uid_util
-from roam_mcp.utils import find_page_by_title as find_page_by_title_util
 
 # Set up logging
 logger = logging.getLogger("roam-mcp.content")
 
 
-def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """
-    Create a new page in Roam Research, potentially with initial content.
-    Uses find_or_create_page helper which utilizes the RoamClient.
-    Handles batch creation of initial content.
-
-    Args:
-        title: Title for the new page.
-        content: Optional list of content dictionaries ({text: str, level: int, heading_level?: int}).
-
-    Returns:
-        Dictionary with success status, UID, URL, and optionally created UIDs.
-    """
-    if not title:
-        return {"success": False, "error": "Title is required"}
+class ContentOperations:
+    """Operations for content management in Roam (pages, blocks, outlines)."""
     
-    client = get_client() # Get client instance
-    graph_name = client.graph_name # Get graph name from client
-
-    try:
-        # find_or_create_page handles finding or creating via the client
-        page_uid = find_or_create_page(title)
+    def __init__(self):
+        """Initialize content operations."""
+        pass
+    
+    def create_page(self, title: str, content: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """
+        Create a new page in Roam Research.
         
-        created_content_uids = []
-        if content:
-            logger.info(f"Adding initial content ({len(content)} items) to new/existing page '{title}' (UID: {page_uid})")
-            # Validate content structure
-            invalid_items = [
-                item for item in content 
-                if not isinstance(item.get("text"), str) or not isinstance(item.get("level"), int)
-            ]
-            if invalid_items:
-                raise ValidationError("Invalid content structure - each item must have text (string) and level (integer)", details={"invalid_items": invalid_items[:3]})
-
-            # Check for invalid level jumps (Roam supports level 1 directly under page)
+        Args:
+            title: Title for the new page
+            content: Optional content for the page
+            
+        Returns:
+            Result with page UID
+        """
+        if not title:
+            return {
+                "success": False,
+                "error": "Title is required"
+            }
+        
+        try:
+            # Create the page
+            page_uid = client.find_or_create_page(title)
+            
+            # Add content if provided
+            if content:
+                # First, validate content structure
+                invalid_items = [
+                    item for item in content 
+                    if not isinstance(item.get("text"), str) or not isinstance(item.get("level"), int)
+                ]
+                
+                if invalid_items:
+                    return {
+                        "success": False,
+                        "error": "Invalid content structure - each item must have text (string) and level (integer)"
+                    }
+                
+                # Check for invalid level jumps
+                prev_level = 0
+                for item in content:
+                    level = item["level"]
+                    if level > prev_level + 1:
+                        return {
+                            "success": False,
+                            "error": f"Invalid content structure - level {level} follows level {prev_level}"
+                        }
+                    prev_level = level
+                
+                # Process the nested content
+                created_uids = process_nested_content(content, page_uid)
+                
+                return {
+                    "success": True,
+                    "uid": page_uid,
+                    "created_uids": created_uids,
+                    "page_url": f"https://roamresearch.com/#/app/{client.graph_name}/page/{page_uid}"
+                }
+            
+            return {
+                "success": True,
+                "uid": page_uid,
+                "page_url": f"https://roamresearch.com/#/app/{client.graph_name}/page/{page_uid}"
+            }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except TransactionError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def create_block(self, content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Create a new block in Roam Research.
+        
+        Args:
+            content: Block content
+            page_uid: Optional page UID
+            page_title: Optional page title
+            
+        Returns:
+            Result with block UID
+        """
+        if not content:
+            return {
+                "success": False,
+                "error": "Content is required"
+            }
+        
+        try:
+            # Determine target page
+            target_page_uid = None
+            
+            if page_uid:
+                # Use provided page UID
+                target_page_uid = page_uid
+            elif page_title:
+                # Find or create page by title
+                target_page_uid = client.find_or_create_page(page_title)
+            else:
+                # Use today's daily page
+                today = datetime.now()
+                date_str = format_roam_date(today)
+                target_page_uid = client.find_or_create_page(date_str)
+            
+            # Handle multi-line content
+            if "\n" in content:
+                # Parse as nested structure
+                markdown_content = convert_to_roam_markdown(content)
+                parsed_content = parse_markdown_list(markdown_content)
+                
+                # Check if there's any content
+                if not parsed_content:
+                    return {
+                        "success": False,
+                        "error": "Failed to parse content"
+                    }
+                
+                # Process nested content
+                created_uids = process_nested_content(parsed_content, target_page_uid)
+                
+                return {
+                    "success": True,
+                    "block_uid": created_uids[0] if created_uids else None,
+                    "parent_uid": target_page_uid,
+                    "created_uids": created_uids
+                }
+            else:
+                # Create a simple block
+                block_uid = client.add_block_to_page(target_page_uid, content)
+                
+                return {
+                    "success": True,
+                    "block_uid": block_uid,
+                    "parent_uid": target_page_uid
+                }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except PageNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except BlockNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except TransactionError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error creating block: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def create_outline(self, outline: List[Dict[str, Any]], page_title_uid: Optional[str] = None, block_text_uid: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Create a structured outline in Roam Research.
+        
+        Args:
+            outline: List of outline items with text and level
+            page_title_uid: Optional page title or UID
+            block_text_uid: Optional block text or UID to add outline under
+            
+        Returns:
+            Result with created block UIDs
+        """
+        # Validate outline
+        if not outline:
+            return {
+                "success": False,
+                "error": "Outline cannot be empty"
+            }
+        
+        # Check for valid levels
+        invalid_items = [item for item in outline if not item.get("text") or not isinstance(item.get("level"), int)]
+        if invalid_items:
+            return {
+                "success": False,
+                "error": "All outline items must have text and a valid level"
+            }
+        
+        try:
+            # Determine target page
+            target_page_uid = None
+            
+            if page_title_uid:
+                # Find page by title or UID
+                page_uid = client.find_page_by_title(page_title_uid)
+                
+                if page_uid:
+                    target_page_uid = page_uid
+                else:
+                    # Create new page if not found
+                    target_page_uid = client.find_or_create_page(page_title_uid)
+            else:
+                # Use today's daily page
+                today = datetime.now()
+                date_str = format_roam_date(today)
+                target_page_uid = client.find_or_create_page(date_str)
+            
+            # Determine parent block
+            parent_uid = target_page_uid
+            
+            if block_text_uid:
+                # Check if it's a valid block UID (9 characters)
+                if len(block_text_uid) == 9 and re.match(r'^[a-zA-Z0-9_-]{9}$', block_text_uid):
+                    # Verify block exists
+                    query = f'''[:find ?uid
+                               :where [?b :block/uid "{block_text_uid}"]
+                                      [?b :block/uid ?uid]]'''
+                    
+                    result = client.execute_query(query)
+                    
+                    if result:
+                        parent_uid = block_text_uid
+                    else:
+                        return {
+                            "success": False,
+                            "error": f"Block with UID {block_text_uid} not found"
+                        }
+                else:
+                    # Create a header block with the given text
+                    action_data = {
+                        "action": "create-block",
+                        "location": {
+                            "parent-uid": target_page_uid,
+                            "order": "last"
+                        },
+                        "block": {
+                            "string": block_text_uid
+                        }
+                    }
+                    
+                    client.execute_write_action(action_data)
+                    header_uid = client.find_block_uid(block_text_uid)
+                    
+                    if not header_uid:
+                        return {
+                            "success": False,
+                            "error": f"Failed to create header block with text: {block_text_uid}"
+                        }
+                        
+                    parent_uid = header_uid
+            
+            # Validate levels (shouldn't skip levels)
             prev_level = 0
-            for item in content:
+            for item in outline:
                 level = item["level"]
-                if level < 1:
-                     raise ValidationError(f"Invalid level {level}. Levels must be 1 or greater.", "level", {"item": item})
-                # Allow level 1 under page (level 0). Level > 1 needs parent at level-1.
-                if level > 1 and level > prev_level + 1:
-                    raise ValidationError(f"Invalid outline structure - level {level} cannot follow level {prev_level}", "level", {"item": item})
+                if level > prev_level + 1:
+                    return {
+                        "success": False,
+                        "error": f"Invalid outline structure - level {level} follows level {prev_level}"
+                    }
                 prev_level = level
-
-            # Use process_nested_content utility which handles batching and dependencies
-            # Pass the client instance to it
-            created_content_uids = process_nested_content_util(content, page_uid, client)
-
-        return {
-            "success": True,
-            "uid": page_uid,
-            "created_uids": created_content_uids, # UIDs of blocks added as content
-            "page_url": f"https://roamresearch.com/#/app/{graph_name}/page/{page_uid}"
-        }
+            
+            # Process the nested content
+            created_uids = process_nested_content(outline, parent_uid)
+            
+            return {
+                "success": True,
+                "page_uid": target_page_uid,
+                "parent_uid": parent_uid,
+                "created_uids": created_uids
+            }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except PageNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except BlockNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except TransactionError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error creating outline: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def import_markdown(self, content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None,
+                       parent_uid: Optional[str] = None, parent_string: Optional[str] = None,
+                       order: str = "last") -> Dict[str, Any]:
+        """
+        Import markdown content into Roam Research.
         
-    except (ValidationError, TransactionError, PageNotFoundError) as e:
-         logger.error(f"Failed to create page '{title}' or add content: {e}", exc_info=True)
-         return {"success": False, "error": str(e)}
-    except Exception as e:
-         logger.error(f"Unexpected error creating page '{title}': {e}", exc_info=True)
-         return {"success": False, "error": f"Unexpected error: {e}"}
+        Args:
+            content: Markdown content to import
+            page_uid: Optional page UID
+            page_title: Optional page title
+            parent_uid: Optional parent block UID
+            parent_string: Optional parent block text
+            order: Position ("first" or "last")
+            
+        Returns:
+            Result with created block UIDs
+        """
+        if not content:
+            return {
+                "success": False,
+                "error": "Content cannot be empty"
+            }
+        
+        if order not in ["first", "last"]:
+            return {
+                "success": False,
+                "error": "Order must be 'first' or 'last'"
+            }
+        
+        try:
+            # Determine target page
+            target_page_uid = None
+            
+            if page_uid:
+                # Use provided page UID
+                target_page_uid = page_uid
+            elif page_title:
+                # Find or create page by title
+                target_page_uid = client.find_or_create_page(page_title)
+            else:
+                # Use today's daily page
+                today = datetime.now()
+                date_str = format_roam_date(today)
+                target_page_uid = client.find_or_create_page(date_str)
+            
+            # Determine parent block
+            parent_block_uid = target_page_uid
+            
+            if parent_uid:
+                # Verify block exists
+                query = f'''[:find ?uid
+                           :where [?b :block/uid "{parent_uid}"]
+                                  [?b :block/uid ?uid]]'''
+                
+                result = client.execute_query(query)
+                
+                if result:
+                    parent_block_uid = parent_uid
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Block with UID {parent_uid} not found"
+                    }
+            elif parent_string:
+                # Find block by string
+                query = f'''[:find ?uid
+                           :where [?p :block/uid "{target_page_uid}"]
+                                  [?b :block/page ?p]
+                                  [?b :block/string "{parent_string}"]
+                                  [?b :block/uid ?uid]]'''
+                
+                result = client.execute_query(query)
+                
+                if result:
+                    parent_block_uid = result[0][0]
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Block with content '{parent_string}' not found on specified page"
+                    }
+            
+            # Convert markdown to Roam format
+            roam_markdown = convert_to_roam_markdown(content)
+            
+            # Parse markdown into hierarchical structure
+            parsed_content = parse_markdown_list(roam_markdown)
+            
+            if not parsed_content:
+                return {
+                    "success": False,
+                    "error": "Failed to parse markdown content"
+                }
+            
+            # Process nested content
+            created_uids = process_nested_content(parsed_content, parent_block_uid)
+            
+            return {
+                "success": True,
+                "page_uid": target_page_uid,
+                "parent_uid": parent_block_uid,
+                "created_uids": created_uids
+            }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except PageNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except BlockNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except TransactionError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error importing markdown: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def add_todos(self, todos: List[str]) -> Dict[str, Any]:
+        """
+        Add todo items to today's daily page.
+        
+        Args:
+            todos: List of todo items
+            
+        Returns:
+            Result with success status
+        """
+        if not todos:
+            return {
+                "success": False,
+                "error": "Todo list cannot be empty"
+            }
+        
+        if not all(isinstance(todo, str) for todo in todos):
+            return {
+                "success": False,
+                "error": "All todo items must be strings"
+            }
+        
+        try:
+            # Get today's daily page
+            today = datetime.now()
+            date_str = format_roam_date(today)
+            daily_page_uid = client.find_or_create_page(date_str)
+            
+            # Create batch actions for todos
+            actions = []
+            for i, todo in enumerate(todos):
+                # Format with TODO syntax
+                todo_content = f"{{{{[[TODO]]}}}} {todo}"
+                
+                # Create action
+                action = create_block_action(
+                    parent_uid=daily_page_uid,
+                    content=todo_content,
+                    order="last"
+                )
+                
+                actions.append(action)
+            
+            # Execute batch actions
+            result = client.execute_batch_actions(actions)
+            created_uids = result.get("created_uids", [])
+            
+            return {
+                "success": True,
+                "created_uids": created_uids,
+                "page_uid": daily_page_uid
+            }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except PageNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except TransactionError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error adding todos: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def update_content(self, block_uid: str, content: Optional[str] = None, transform_pattern: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Update a block's content or transform it using a pattern.
+        
+        Args:
+            block_uid: Block UID
+            content: New content
+            transform_pattern: Pattern for transformation
+            
+        Returns:
+            Result with updated content
+        """
+        if not block_uid:
+            return {
+                "success": False,
+                "error": "Block UID is required"
+            }
+        
+        if not content and not transform_pattern:
+            return {
+                "success": False,
+                "error": "Either content or transform_pattern must be provided"
+            }
+        
+        try:
+            # Get current content if doing a transformation
+            if transform_pattern:
+                # Validate transform pattern
+                if not isinstance(transform_pattern, dict):
+                    return {
+                        "success": False,
+                        "error": "Transform pattern must be an object"
+                    }
+                
+                if "find" not in transform_pattern or "replace" not in transform_pattern:
+                    return {
+                        "success": False,
+                        "error": "Transform pattern must include 'find' and 'replace' properties"
+                    }
+                
+                query = f'''[:find ?string .
+                            :where [?b :block/uid "{block_uid}"]
+                                    [?b :block/string ?string]]'''
+                
+                current_content = client.execute_query(query)
+                
+                if not current_content:
+                    return {
+                        "success": False,
+                        "error": f"Block with UID {block_uid} not found"
+                    }
+                
+                # Apply transformation
+                find = transform_pattern["find"]
+                replace = transform_pattern["replace"]
+                global_replace = transform_pattern.get("global", True)
+                
+                try:
+                    flags = re.MULTILINE
+                    count = 0 if global_replace else 1
+                    new_content = re.sub(find, replace, current_content, count=count, flags=flags)
+                    
+                    # Update block
+                    client.update_block(block_uid, new_content)
+                    
+                    return {
+                        "success": True,
+                        "content": new_content
+                    }
+                except re.error as e:
+                    return {
+                        "success": False,
+                        "error": f"Invalid regex pattern: {str(e)}"
+                    }
+            else:
+                # Direct content update
+                client.update_block(block_uid, content)
+                
+                return {
+                    "success": True,
+                    "content": content
+                }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except BlockNotFoundError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except TransactionError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error updating content: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def update_multiple_contents(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Update multiple blocks in a single operation.
+        
+        Args:
+            updates: List of update operations
+            
+        Returns:
+            Results of updates
+        """
+        if not updates or not isinstance(updates, list):
+            return {
+                "success": False,
+                "error": "Updates must be a non-empty list"
+            }
+        
+        try:
+            # Validate each update
+            for i, update in enumerate(updates):
+                if "block_uid" not in update:
+                    return {
+                        "success": False,
+                        "error": f"Update at index {i} is missing required 'block_uid' property"
+                    }
+                
+                if "content" not in update and "transform" not in update:
+                    return {
+                        "success": False,
+                        "error": f"Update at index {i} must include either 'content' or 'transform'"
+                    }
+                
+                if "transform" in update:
+                    transform = update["transform"]
+                    if not isinstance(transform, dict):
+                        return {
+                            "success": False,
+                            "error": f"Transform at index {i} must be an object"
+                        }
+                    
+                    if "find" not in transform or "replace" not in transform:
+                        return {
+                            "success": False,
+                            "error": f"Transform at index {i} must include 'find' and 'replace' properties"
+                        }
+            
+            # Process batch operations
+            results = []
+            actions = []
+            
+            # First, get current content for all blocks
+            block_uids = [update["block_uid"] for update in updates]
+            query = f'''[:find ?uid ?string
+                        :in $ [?uid ...]
+                        :where [?b :block/uid ?uid]
+                               [?b :block/string ?string]]'''
+            
+            block_results = client.execute_query(query, [block_uids])
+            
+            # Create map of uid -> content
+            content_map = {uid: content for uid, content in block_results}
+            
+            # Process each update
+            for update in updates:
+                block_uid = update["block_uid"]
+                current_content = content_map.get(block_uid)
+                
+                if not current_content:
+                    results.append({
+                        "block_uid": block_uid,
+                        "success": False,
+                        "error": f"Block with UID {block_uid} not found"
+                    })
+                    continue
+                
+                try:
+                    if "content" in update:
+                        # Direct content update
+                        new_content = update["content"]
+                        actions.append({
+                            "action": "update-block",
+                            "block": {
+                                "uid": block_uid,
+                                "string": new_content
+                            }
+                        })
+                        
+                        results.append({
+                            "block_uid": block_uid,
+                            "content": new_content,
+                            "success": True
+                        })
+                    elif "transform" in update:
+                        # Pattern transformation
+                        transform = update["transform"]
+                        find = transform["find"]
+                        replace = transform["replace"]
+                        global_flag = transform.get("global_flag", True)
+                        
+                        try:
+                            flags = re.MULTILINE
+                            count = 0 if global_flag else 1
+                            new_content = re.sub(find, replace, current_content, count=count, flags=flags)
+                            
+                            actions.append({
+                                "action": "update-block",
+                                "block": {
+                                    "uid": block_uid,
+                                    "string": new_content
+                                }
+                            })
+                            
+                            results.append({
+                                "block_uid": block_uid,
+                                "content": new_content,
+                                "success": True
+                            })
+                        except re.error as e:
+                            results.append({
+                                "block_uid": block_uid,
+                                "success": False,
+                                "error": f"Invalid regex pattern: {str(e)}"
+                            })
+                except Exception as e:
+                    results.append({
+                        "block_uid": block_uid,
+                        "success": False,
+                        "error": str(e)
+                    })
+            
+            # Execute batch update if we have any valid actions
+            if actions:
+                try:
+                    client.execute_batch_actions(actions)
+                except Exception as e:
+                    # Mark all previously successful results as failed
+                    for result in results:
+                        if result.get("success"):
+                            result["success"] = False
+                            result["error"] = f"Batch update failed: {str(e)}"
+            
+            # Count successful updates
+            successful = sum(1 for result in results if result.get("success"))
+            
+            return {
+                "success": successful == len(updates),
+                "results": results,
+                "message": f"Updated {successful}/{len(updates)} blocks successfully"
+            }
+        except ValidationError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error updating multiple blocks: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
 
+
+# Create global instance
+content_ops = ContentOperations()
+
+# Legacy functions that delegate to the instance
+def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.create_page(title, content)
 
 def create_block(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Create a new block in Roam Research, handling single or multi-line content.
-    Uses helpers which utilize the RoamClient.
-
-    Args:
-        content: Block content (can be multi-line markdown).
-        page_uid: Optional UID of the target page.
-        page_title: Optional title of the target page (used if page_uid is not provided).
-        
-    Returns:
-        Dictionary with success status, block UID, parent UID, and potentially more created UIDs for multi-line.
-    """
-    if not content:
-        return {"success": False, "error": "Content is required"}
-
-    client = get_client() # Get client instance
-    
-    try:
-        # Determine target page UID using helpers that use the client
-        target_page_uid: Optional[str] = None
-        if page_uid:
-            # Verify page_uid exists? Optional, find_or_create_page does validation if title is used.
-            # For now, assume provided UID is correct. Add verification if needed.
-             target_page_uid = page_uid
-        elif page_title:
-            target_page_uid = find_or_create_page(page_title) # Handles find/create
-        else:
-            target_page_uid = get_daily_page() # Handles find/create
-
-        if not target_page_uid:
-             # Should not happen if helpers work correctly, but safety check.
-             raise PageNotFoundError("Could not determine target page UID.")
-
-        # Handle multi-line content via markdown parsing and batching
-        if "\n" in content or content.strip().startswith(("- ", "* ", "+ ")): # Check for list markers too
-            logger.debug("Content contains newline or list marker, processing as nested structure.")
-            # Convert and parse the markdown
-            roam_markdown = convert_to_roam_markdown(content)
-            parsed_structure = parse_markdown_list(roam_markdown)
-
-            if not parsed_structure:
-                raise ValidationError("Failed to parse multi-line content into a structure.", details={"content": content[:100]})
-
-            # Use process_nested_content for creation via batching
-            created_uids = process_nested_content_util(parsed_structure, target_page_uid, client)
-            
-            if not created_uids:
-                 # This might happen if parsing yielded structure but creation failed or returned nothing
-                 raise TransactionError("Block creation process completed but returned no UIDs.", "batch-create", {"content": content[:100]})
-
-            return {
-                "success": True,
-                "block_uid": created_uids[0], # UID of the first top-level block created
-                "parent_uid": target_page_uid,
-                "created_uids": created_uids # All UIDs created
-            }
-        else:
-            # Single line content, create a simple block using the helper
-            logger.debug("Content is single line, creating simple block.")
-            block_uid = add_block_to_page(target_page_uid, content) # Helper uses client
-            return {
-                "success": True,
-                "block_uid": block_uid,
-                "parent_uid": target_page_uid
-            }
-
-    except (ValidationError, PageNotFoundError, BlockNotFoundError, TransactionError) as e:
-        logger.error(f"Failed to create block: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"Unexpected error creating block: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
-
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.create_block(content, page_uid, page_title)
 
 def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] = None, block_text_uid: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Create a structured outline under a specified page or block.
-    Uses helpers which utilize the RoamClient.
-
-    Args:
-        outline: List of dictionaries [{text: str, level: int, heading_level?: int}].
-        page_title_uid: Optional target page (title or UID). Defaults to daily page.
-        block_text_uid: Optional parent block (text or UID) under the target page. Defaults to page root.
-
-    Returns:
-        Dictionary with success status, page UID, parent UID, and created UIDs.
-    """
-    if not outline:
-        return {"success": False, "error": "Outline cannot be empty"}
-    
-    # Basic validation of outline structure
-    if not all(isinstance(item, dict) and isinstance(item.get("text"), str) and isinstance(item.get("level"), int) for item in outline):
-         raise ValidationError("Invalid outline structure: Each item must be a dict with 'text' (str) and 'level' (int).", "outline")
-
-    client = get_client() # Get client instance
-
-    try:
-        # Determine target page UID
-        target_page_uid: Optional[str] = None
-        if page_title_uid:
-            target_page_uid = find_or_create_page(page_title_uid) # Handles find/create/validation
-        else:
-            target_page_uid = get_daily_page() # Handles find/create
-
-        if not target_page_uid:
-             raise PageNotFoundError("Could not determine target page for outline.")
-
-        # Determine parent block UID (either page root or specified block)
-        parent_block_uid = target_page_uid # Default to page root
-
-        if block_text_uid:
-            logger.debug(f"Looking for or creating parent block '{block_text_uid}' under page {target_page_uid}")
-            # Check if it's a UID
-            if len(block_text_uid) == 9 and re.match(r'^[a-zA-Z0-9_-]{9}$', block_text_uid):
-                 # Verify block exists (optional but good practice)
-                 try:
-                     block_data = client.pull("[:block/uid]", block_text_uid)
-                     if block_data and block_data.get(':block/uid') == block_text_uid:
-                          parent_block_uid = block_text_uid
-                          logger.debug(f"Found existing block by UID: {block_text_uid}")
-                     else:
-                          raise BlockNotFoundError(block_text_uid, {"message": "Provided UID does not exist or is not a block."})
-                 except QueryError as e: # Includes pull errors
-                      raise BlockNotFoundError(block_text_uid, {"message": f"Error verifying block UID: {e}"})
-            else:
-                 # Not a UID, treat as text. Find or create this block under the page.
-                 # Try finding first
-                 found_uid = find_block_uid_util(client, block_text_uid) # Find anywhere first? Or scoped to page? Let's scope.
-                 
-                 # Scoped find query:
-                 query = f'''[:find ?uid .
-                            :in $ ?page_uid ?text
-                            :where [?p :block/uid ?page_uid]
-                                   [?b :block/page ?p] ; or :block/parents ?p for direct child?
-                                   [?b :block/string ?text]
-                                   [?b :block/uid ?uid]]'''
-                 scoped_result = client.query(query, inputs=[target_page_uid, block_text_uid])
-
-                 if scoped_result and isinstance(scoped_result, str):
-                      parent_block_uid = scoped_result
-                      logger.debug(f"Found existing block by text '{block_text_uid}' on page: {parent_block_uid}")
-                 else:
-                      # Create the block if not found
-                      logger.debug(f"Creating header block '{block_text_uid}' on page {target_page_uid}")
-                      parent_block_uid = add_block_to_page(target_page_uid, block_text_uid) # Uses client
-
-        # Validate outline levels before creating
-        prev_level = 0
-        for item in outline:
-            level = item["level"]
-            if level < 1: raise ValidationError("Levels must be 1 or greater.", "level", {"item": item})
-            # Allow level 1 under the target parent.
-            # Subsequent levels must be <= prev_level + 1
-            if level > 1 and level > prev_level + 1:
-                 raise ValidationError(f"Invalid outline structure - level {level} cannot follow level {prev_level}", "level", {"item": item})
-            prev_level = level
-
-        # Process the nested outline structure using the utility
-        logger.info(f"Creating outline under parent UID: {parent_block_uid}")
-        created_uids = process_nested_content_util(outline, parent_block_uid, client)
-
-        if not created_uids:
-             # Should ideally not happen if outline was valid, but indicates potential issue.
-             logger.warning(f"Outline creation process finished but yielded no UIDs under {parent_block_uid}.")
-             # Return success but with empty list? Or error? Let's return success with warning logged.
-
-        return {
-            "success": True,
-            "page_uid": target_page_uid,
-            "parent_uid": parent_block_uid, # The UID where the outline starts
-            "created_uids": created_uids # UIDs of the top-level outline items created
-        }
-
-    except (ValidationError, PageNotFoundError, BlockNotFoundError, TransactionError) as e:
-        logger.error(f"Failed to create outline: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"Unexpected error creating outline: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
-
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.create_outline(outline, page_title_uid, block_text_uid)
 
 def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None,
                    parent_uid: Optional[str] = None, parent_string: Optional[str] = None,
                    order: str = "last") -> Dict[str, Any]:
-    """
-    Import markdown content into a specified location in Roam.
-    Uses helpers which utilize the RoamClient.
-
-    Args:
-        content: Markdown content string.
-        page_uid: Optional target page UID.
-        page_title: Optional target page title (used if page_uid is None).
-        parent_uid: Optional target parent block UID (takes precedence over parent_string).
-        parent_string: Optional target parent block's exact string content (requires page context).
-        order: Where to add the top-level items ("first" or "last"). Defaults to "last".
-
-    Returns:
-        Dictionary with success status, page UID, parent UID, and created UIDs.
-    """
-    if not content:
-        return {"success": False, "error": "Content cannot be empty"}
-    if order not in ["first", "last"]:
-        raise ValidationError("Order must be 'first' or 'last'", "order")
-
-    client = get_client() # Get client instance
-
-    try:
-        # 1. Determine Target Page UID
-        target_page_uid: Optional[str] = None
-        if page_uid:
-            target_page_uid = page_uid # Assume valid if provided
-        elif page_title:
-            target_page_uid = find_or_create_page(page_title)
-        elif parent_string and not parent_uid:
-             # Need page context if finding parent by string
-             raise ValidationError("page_uid or page_title is required when using parent_string without parent_uid.", "page_title_uid")
-        else:
-            # Default to daily page if no context given
-            target_page_uid = get_daily_page()
-            
-        if not target_page_uid:
-             raise PageNotFoundError("Could not determine target page for import.")
-
-        # 2. Determine Parent Block UID
-        parent_block_uid = target_page_uid # Default to page root
-
-        if parent_uid:
-            # Verify parent_uid exists (optional, assume valid for now)
-            parent_block_uid = parent_uid
-            logger.debug(f"Using specified parent block UID: {parent_uid}")
-        elif parent_string:
-            # Find parent block by string within the target page
-            logger.debug(f"Searching for parent block with text '{parent_string}' on page {target_page_uid}")
-            query = f'''[:find ?uid .
-                       :in $ ?page_uid ?text
-                       :where [?p :block/uid ?page_uid]
-                              [?b :block/page ?p] ; Or :block/parents ?p ?
-                              [?b :block/string ?text]
-                              [?b :block/uid ?uid]]'''
-            scoped_result = client.query(query, inputs=[target_page_uid, parent_string])
-            if scoped_result and isinstance(scoped_result, str):
-                 parent_block_uid = scoped_result
-                 logger.debug(f"Found parent block by text: {parent_block_uid}")
-            else:
-                 raise BlockNotFoundError(f"Content: '{parent_string}'", {"page_uid": target_page_uid, "message": "Parent block string not found on the specified page."})
-
-        # 3. Convert and Parse Markdown
-        logger.debug("Converting and parsing markdown content.")
-        roam_markdown = convert_to_roam_markdown(content)
-        parsed_structure = parse_markdown_list(roam_markdown)
-
-        if not parsed_structure:
-             # Allow importing empty string? Maybe just log warning.
-             logger.warning("Markdown content parsed into an empty structure. Nothing to import.")
-             return {
-                 "success": True,
-                 "page_uid": target_page_uid,
-                 "parent_uid": parent_block_uid,
-                 "created_uids": [],
-                 "message": "Markdown parsed as empty, no blocks created."
-             }
-
-        # 4. Process Nested Content (Handles Batching)
-        # Note: process_nested_content needs modification to accept 'order' for top-level items.
-        # Simplified: process_nested_content currently uses 'last' internally.
-        # We need a way to handle 'first' or pass order down.
-        # For now, the 'order' parameter only influences the *conceptual* placement,
-        # the actual implementation in process_nested_content needs update.
-        # Let's simulate 'first' by reversing and using 'last', then reversing result? Hacky.
-        # TODO: Refactor process_nested_content to accept top-level order.
-        if order == "first":
-             logger.warning("Using 'first' order for import is not fully supported yet by process_nested_content, may behave like 'last'.")
-             # parsed_structure.reverse() # Hacky attempt, might mess up children
-
-        logger.info(f"Importing {len(parsed_structure)} top-level markdown items under parent {parent_block_uid}")
-        created_uids = process_nested_content_util(parsed_structure, parent_block_uid, client)
-
-        # if order == "first": created_uids.reverse() # Reverse UIDs if input was reversed
-
-        return {
-            "success": True,
-            "page_uid": target_page_uid,
-            "parent_uid": parent_block_uid,
-            "created_uids": created_uids
-        }
-
-    except (ValidationError, PageNotFoundError, BlockNotFoundError, TransactionError) as e:
-        logger.error(f"Failed to import markdown: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"Unexpected error importing markdown: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
-
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.import_markdown(content, page_uid, page_title, parent_uid, parent_string, order)
 
 def add_todos(todos: List[str]) -> Dict[str, Any]:
-    """
-    Add multiple todo items to today's daily page using batch actions.
-    Uses helpers which utilize the RoamClient.
-
-    Args:
-        todos: List of todo item strings.
-
-    Returns:
-        Dictionary with success status, created UIDs, and page UID.
-    """
-    if not todos:
-        return {"success": False, "error": "Todo list cannot be empty"}
-    if not all(isinstance(todo, str) for todo in todos):
-        raise ValidationError("All todo items must be strings.", "todos")
-
-    client = get_client() # Get client instance
-
-    try:
-        daily_page_uid = get_daily_page() # Handles find/create
-
-        actions = []
-        for i, todo_text in enumerate(todos):
-            if not todo_text.strip(): continue # Skip empty todos
-            
-            todo_content = f"{{{{[[TODO]]}}}} {todo_text.strip()}"
-            action = create_block_action(
-                parent_uid=daily_page_uid,
-                content=todo_content,
-                order="last" # Add todos to the end
-            )
-            actions.append(action)
-
-        if not actions:
-            return {"success": True, "created_uids": [], "page_uid": daily_page_uid, "message": "No non-empty todos provided."}
-
-        logger.info(f"Adding {len(actions)} TODOs to daily page {daily_page_uid}")
-        # Use execute_batch_actions which handles chunking and uses the client
-        result = execute_batch_actions(actions)
-
-        return {
-            "success": result.get("success", False), # Reflect actual batch success
-            "created_uids": result.get("created_uids", []),
-            "page_uid": daily_page_uid
-        }
-
-    except (ValidationError, PageNotFoundError, TransactionError) as e:
-        logger.error(f"Failed to add todos: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"Unexpected error adding todos: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
-
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.add_todos(todos)
 
 def update_content(block_uid: str, content: Optional[str] = None, transform_pattern: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Update a block's content directly or via transformation.
-    Uses helpers which utilize the RoamClient.
-
-    Args:
-        block_uid: UID of the block to update.
-        content: Optional new content string.
-        transform_pattern: Optional dictionary with {'find': str, 'replace': str, 'global'?: bool}.
-
-    Returns:
-        Dictionary with success status and the final content.
-    """
-    if not block_uid:
-        return {"success": False, "error": "Block UID is required"}
-    if content is None and transform_pattern is None:
-        return {"success": False, "error": "Either 'content' or 'transform_pattern' must be provided"}
-    if content is not None and transform_pattern is not None:
-         return {"success": False, "error": "Provide either 'content' or 'transform_pattern', not both"}
-
-    # client = get_client() # Client is used within update_block/transform_block helpers
-
-    try:
-        if transform_pattern:
-            # Validate transform structure
-            if not isinstance(transform_pattern, dict) or "find" not in transform_pattern or "replace" not in transform_pattern:
-                 raise ValidationError("Invalid 'transform_pattern' structure. Required keys: 'find', 'replace'. Optional: 'global'.", "transform_pattern")
-            
-            logger.debug(f"Transforming block {block_uid}")
-            # transform_block helper uses the client
-            final_content = transform_block(
-                block_uid,
-                transform_pattern["find"],
-                transform_pattern["replace"],
-                transform_pattern.get("global", True)
-            )
-            return {"success": True, "content": final_content}
-            
-        elif content is not None:
-            logger.debug(f"Updating block {block_uid} with new content.")
-            # update_block helper uses the client
-            success = update_block(block_uid, content)
-            if success:
-                 return {"success": True, "content": content}
-            else:
-                 # Should not happen if update_block raises error, but safety catch
-                 raise TransactionError("update_block reported failure.", "update-block", {"block_uid": block_uid})
-        else:
-             # Should be caught by initial validation
-             raise ValidationError("Internal error: No operation specified for update_content.")
-
-    except (ValidationError, BlockNotFoundError, TransactionError, QueryError) as e:
-        logger.error(f"Failed to update content for block {block_uid}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.error(f"Unexpected error updating content for block {block_uid}: {e}", exc_info=True)
-        return {"success": False, "error": f"Unexpected error: {e}"}
-
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.update_content(block_uid, content, transform_pattern)
 
 def update_multiple_contents(updates: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Update multiple blocks using batch_update_blocks helper.
-    Uses helpers which utilize the RoamClient.
-
-    Args:
-        updates: List of update specifications [{'block_uid': str, 'content'?: str, 'transform'?: dict}].
-
-    Returns:
-        Dictionary with overall success status and list of individual results.
-    """
-    if not updates or not isinstance(updates, list):
-        return {"success": False, "error": "Updates must be a non-empty list"}
-
-    # client = get_client() # Used within batch_update_blocks helper
-    
-    try:
-        # batch_update_blocks handles validation, preparation, execution, and results
-        individual_results = batch_update_blocks(updates)
-        
-        successful_count = sum(1 for r in individual_results if r.get("success"))
-        overall_success = successful_count == len(updates)
-        
-        return {
-            "success": overall_success,
-            "results": individual_results,
-            "message": f"Attempted {len(updates)} updates. Successful: {successful_count}."
-        }
-    except (ValidationError, TransactionError) as e: # Catch errors from batch_update_blocks itself
-         logger.error(f"Batch update process failed: {e}", exc_info=True)
-         # Create a generic error result for all inputs if the process fails early
-         error_results = [{"block_uid": u.get("block_uid", "N/A"), "success": False, "error": str(e)} for u in updates]
-         return {"success": False, "results": error_results, "error": f"Batch update failed: {e}"}
-    except Exception as e:
-         logger.error(f"Unexpected error during multiple updates: {e}", exc_info=True)
-         error_results = [{"block_uid": u.get("block_uid", "N/A"), "success": False, "error": f"Unexpected error: {e}"} for u in updates]
-         return {"success": False, "results": error_results, "error": f"Unexpected error: {e}"}
+    """Legacy function that delegates to the content_ops instance."""
+    return content_ops.update_multiple_contents(updates)
