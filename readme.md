@@ -39,6 +39,23 @@ The Roam MCP server provides a wide range of tools for interacting with your Roa
 - `get_roam_graph_info`: Get information about your Roam graph
 - `summarize_page`: Generate a prompt to summarize a Roam page
 
+### URL Content Parsing
+
+The Roam MCP server supports extracting content from web pages, PDFs, and YouTube videos:
+use_mcp_tool roam-helper parse_url {
+"url": "https://example.com/article.html"
+}
+Or use the specific parsers for each type:
+use_mcp_tool roam-helper fetch_webpage_content {
+"url": "https://example.com/article.html"
+}
+use_mcp_tool roam-helper fetch_pdf_content {
+"url": "https://example.com/document.pdf"
+}
+use_mcp_tool roam-helper get_youtube_transcript {
+"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+}
+
 ## Installation and Setup with Claude Desktop
 
 1. Install Claude Desktop from [https://claude.ai/download](https://claude.ai/download)
