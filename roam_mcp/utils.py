@@ -42,92 +42,13 @@ MD_CODE_BLOCK_PATTERN = r'```([a-zA-Z0-9]*)\s*\n([\s\S]*?)```'
 MD_INLINE_CODE_PATTERN = r'`([^`]+)`'
 
 # Table regex patterns
-MD_TABLE_PATTERN = r'(?:\|(.+)\|\s*\n\|(?::?-+:?\|)+\s*\n(?:\|(?:.+)\|\s*\n)+)'
+MD_TABLE_PATTERN = r'(?:\|(.+)\|\s*\n\|(?::?-+:?\|)+\s*\n(?:\|(?:.+)\|\s*\n*)+)'
 MD_TABLE_ROW_PATTERN = r'\|(.*)\|'
 MD_TABLE_HEADER_PATTERN = r'\|(\s*:?-+:?\s*)\|'
 MD_TABLE_ALIGNMENT_PATTERN = r'^(:?)-+(:?)$'  # For detecting alignment in table headers
 
 # Headings pattern
 MD_HEADING_PATTERN = r'^(#{1,6})\s+(.+)$'
-
-
-class MarkdownNode:
-    """Enhanced node representation for markdown parsing."""
-    
-    def __init__(self, content: str, level: int = 0, heading_level: int = 0):
-        """
-        Initialize a markdown node with improved properties.
-        
-        Args:
-            content: The text content of the node
-            level: Indentation level (0 for root)
-            heading_level: Optional heading level (1-3)
-        """
-        self.content = content
-        self.level = level
-        self.heading_level = heading_level
-        self.children = []
-        self.attrs = {}  # For additional attributes like alignment, code language
-        self.node_type = "normal"  # Can be "normal", "code", "table", "heading"
-    
-    def add_child(self, node: 'MarkdownNode') -> None:
-        """
-        Add a child node with proper linking.
-        
-        Args:
-            node: Child node to add
-        """
-        self.children.append(node)
-        
-    def to_roam_action(self, parent_uid: str, order: Union[str, int] = "last") -> Dict[str, Any]:
-        """
-        Convert node to a Roam API action.
-        
-        Args:
-            parent_uid: UID of the parent block
-            order: Position in parent's children
-            
-        Returns:
-            Action dictionary for Roam API
-        """
-        block_data = {
-            "string": self.content
-        }
-        
-        if self.heading_level > 0 and self.heading_level <= 3:
-            block_data["heading"] = self.heading_level
-            
-        return {
-            "action": "create-block",
-            "location": {
-                "parent-uid": parent_uid,
-                "order": order
-            },
-            "block": block_data
-        }
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert node to dictionary representation.
-        
-        Returns:
-            Dictionary with node properties
-        """
-        result = {
-            "text": self.content,
-            "level": self.level
-        }
-        
-        if self.heading_level:
-            result["heading_level"] = self.heading_level
-            
-        if self.attrs:
-            result["attrs"] = self.attrs
-            
-        if self.node_type != "normal":
-            result["node_type"] = self.node_type
-            
-        return result
 
 
 # Markdown conversion utilities
@@ -293,15 +214,43 @@ def convert_tables(text: str) -> str:
     return re.sub(MD_TABLE_PATTERN, table_replacer, text)
 
 
-def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
+class MarkdownNode:
+    """Class representing a node in the markdown parsing tree."""
+    def __init__(self, content: str, level: int = 0, heading_level: int = 0):
+        self.content = content
+        self.level = level
+        self.heading_level = heading_level
+        self.children = []
+    
+    def add_child(self, node: 'MarkdownNode') -> None:
+        """Add a child node to this node."""
+        self.children.append(node)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert node to dictionary representation."""
+        result = {
+            "text": self.content,
+            "level": self.level
+        }
+        
+        if self.heading_level:
+            result["heading_level"] = self.heading_level
+            
+        if self.children:
+            result["children"] = [child.to_dict() for child in self.children]
+            
+        return result
+        
+
+def parse_markdown_list(markdown: str) -> List[Dict[str, Any]]:
     """
-    Parse a markdown string into a hierarchical structure of MarkdownNode objects.
+    Parse a markdown list into a hierarchical structure.
     
     Args:
-        markdown: Markdown text to parse
+        markdown: Markdown text with nested lists
         
     Returns:
-        List of top-level MarkdownNode objects with their children
+        List of dictionaries with 'text', 'level', and 'children' keys
     """
     # Convert markdown syntax first
     markdown = convert_to_roam_markdown(markdown)
@@ -313,7 +262,6 @@ def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
     in_code_block = False
     code_block_content = []
     code_block_indent = 0
-    code_block_language = ""
     
     for line_idx, line in enumerate(lines):
         if not line.strip() and not in_code_block:
@@ -323,16 +271,9 @@ def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
         if "```" in line and not in_code_block:
             # Start of code block
             in_code_block = True
-            # Extract language if specified
-            language_match = re.match(r'^(\s*)```(.*)$', line)
-            if language_match:
-                code_block_indent = len(language_match.group(1))
-                code_block_language = language_match.group(2).strip()
-            else:
-                code_block_indent = len(line) - len(line.lstrip())
-                code_block_language = ""
-                
             code_block_content = [line]
+            # Store the indentation level
+            code_block_indent = len(line) - len(line.lstrip())
             continue
         elif "```" in line and in_code_block:
             # End of code block - process the entire block
@@ -346,12 +287,9 @@ def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
             
             # Create a node for the code block
             node = MarkdownNode(content, level)
-            node.node_type = "code"
-            if code_block_language:
-                node.attrs["language"] = code_block_language
             
             # Find the right parent for this node
-            while len(node_stack) > 1 and node_stack[-1].level >= level:
+            while node_stack[-1].level >= level:
                 node_stack.pop()
                 
             # Add to parent
@@ -383,7 +321,6 @@ def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
                 
             # Create heading node
             node = MarkdownNode(heading_text, level, heading_level)
-            node.node_type = "heading"
             node_stack[-1].add_child(node)
             node_stack.append(node)
             current_level = level
@@ -396,21 +333,17 @@ def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
             level = len(indent) // 2 + 1  # Convert indentation to level, starting with 1
             
             # Check for TODO/DONE
-            todo_match = re.search(r'^\s*\{\{\[\[(TODO|DONE)\]\]\}\}\s*(.*)$', content)
-            if todo_match:
-                status = todo_match.group(1)
-                text = todo_match.group(2).strip()
-                
-                node = MarkdownNode(content, level)
-                node.attrs["status"] = status
+            if "{{[[TODO]]}}" in content or "{{[[DONE]]}}" in content:
+                level_to_append = level
             else:
-                node = MarkdownNode(content, level)
+                level_to_append = level
             
             # Pop stack until we find parent level
-            while len(node_stack) > 1 and node_stack[-1].level >= level:
+            while node_stack[-1].level >= level:
                 node_stack.pop()
                 
-            # Add to parent
+            # Create new node
+            node = MarkdownNode(content, level_to_append)
             node_stack[-1].add_child(node)
             node_stack.append(node)
             current_level = level
@@ -427,105 +360,49 @@ def parse_markdown_content(markdown: str) -> List[MarkdownNode]:
                 node_stack = [root, node]
                 current_level = 0
     
-    # Return the children of the root node
-    return root.children
-
-
-def parse_markdown_list(markdown: str) -> List[Dict[str, Any]]:
-    """
-    Parse a markdown list into a hierarchical structure suitable for Roam.
-    
-    Args:
-        markdown: Markdown text with nested lists
-        
-    Returns:
-        List of dictionaries with 'text', 'level', and 'heading_level' keys
-    """
-    nodes = parse_markdown_content(markdown)
+    # Convert the tree to the expected dictionary format
     result = []
+    for node in root.children:
+        def process_node(node, result_list):
+            node_dict = node.to_dict()
+            
+            # Handle children recursively
+            children = node_dict.pop("children", [])
+            result_list.append(node_dict)
+            
+            # Process children
+            for child in children:
+                process_node(MarkdownNode(
+                    child["text"], 
+                    child.get("level", 0),
+                    child.get("heading_level", 0)
+                ), result_list)
+            
+        process_node(node, result)
     
-    def process_node(node: MarkdownNode):
-        node_dict = node.to_dict()
-        result.append(node_dict)
-        
-        for child in node.children:
-            process_node(child)
-    
-    for node in nodes:
-        process_node(node)
-        
     return result
 
 
-def nodes_to_roam_actions(nodes: List[MarkdownNode], parent_uid: str, order: Union[str, int] = "last") -> List[Dict[str, Any]]:
+def convert_roam_dates(text: str) -> str:
     """
-    Convert MarkdownNode objects to Roam API actions.
+    Convert date references to Roam date format.
     
     Args:
-        nodes: List of MarkdownNode objects
-        parent_uid: UID of the parent block/page
-        order: Position for the blocks
+        text: Text with potential date references
         
     Returns:
-        List of Roam API actions
+        Text with dates in Roam format
     """
-    if not nodes:
-        return []
+    # Convert ISO dates (YYYY-MM-DD)
+    def replace_date(match: Match) -> str:
+        date_str = match.group(0)
+        try:
+            date = datetime.strptime(date_str, "%Y-%m-%d")
+            return format_roam_date(date)
+        except ValueError:
+            return date_str
     
-    actions = []
-    
-    # Process top-level nodes first
-    temp_uid_map = {}  # Maps node to temporary UID for parent reference
-    
-    for i, node in enumerate(nodes):
-        # Create action for this node
-        node_order = order if i == 0 else "last"
-        action = node.to_roam_action(parent_uid, node_order)
-        actions.append(action)
-        
-        # Save temporary UID for children to reference
-        temp_uid = f"temp_{i}"
-        temp_uid_map[node] = temp_uid
-        
-        # Process children recursively
-        if node.children:
-            child_actions = process_children(node.children, temp_uid)
-            actions.extend(child_actions)
-    
-    return actions
-
-def process_children(nodes: List[MarkdownNode], parent_temp_uid: str) -> List[Dict[str, Any]]:
-    """
-    Process child nodes recursively for conversion to Roam actions.
-    
-    Args:
-        nodes: List of child MarkdownNode objects
-        parent_temp_uid: Temporary UID of the parent
-        
-    Returns:
-        List of Roam API actions for children
-    """
-    if not nodes:
-        return []
-    
-    actions = []
-    temp_uid_map = {}  # Maps node to temporary UID
-    
-    for i, node in enumerate(nodes):
-        # Create action for this node
-        action = node.to_roam_action(parent_temp_uid, "last")
-        actions.append(action)
-        
-        # Save temporary UID for children to reference
-        temp_uid = f"{parent_temp_uid}_{i}"
-        temp_uid_map[node] = temp_uid
-        
-        # Process children recursively
-        if node.children:
-            child_actions = process_children(node.children, temp_uid)
-            actions.extend(child_actions)
-    
-    return actions
+    return re.sub(r'\b\d{4}-\d{2}-\d{2}\b', replace_date, text)
 
 
 def extract_youtube_video_id(url: str) -> Optional[str]:
@@ -588,193 +465,262 @@ def create_block_action(parent_uid: str, content: str, order: Union[int, str] = 
     }
 
 
-def prepare_batch_actions(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def process_nested_content(content: List[Dict], parent_uid: str, session, headers, graph_name: str) -> List[str]:
     """
-    Prepare batch actions by optimizing order and resolving dependencies.
-    
-    Args:
-        actions: List of actions to prepare
-        
-    Returns:
-        Optimized list of actions
-    """
-    if not actions:
-        return []
-    
-    # Group actions by type for more efficient processing
-    action_groups = {
-        "create-page": [],
-        "create-block": [],
-        "update-block": [],
-        "delete-block": [],
-        "other": []
-    }
-    
-    for action in actions:
-        action_type = action.get("action", "other")
-        if action_type in action_groups:
-            action_groups[action_type].append(action)
-        else:
-            action_groups["other"].append(action)
-    
-    # Create pages first, then blocks, then updates
-    optimized = []
-    optimized.extend(action_groups["create-page"])
-    
-    # Organize create-block actions by dependency
-    create_blocks = action_groups["create-block"]
-    if create_blocks:
-        # Build dependency graph
-        dependency_map = {}
-        for i, action in enumerate(create_blocks):
-            parent_uid = action["location"]["parent-uid"]
-            # Track dependency if parent is a temporary UID
-            if isinstance(parent_uid, str) and parent_uid.startswith("temp_"):
-                if parent_uid not in dependency_map:
-                    dependency_map[parent_uid] = []
-                dependency_map[parent_uid].append(i)
-        
-        # Sort create-block actions to respect dependencies
-        sorted_blocks = []
-        processed = set()
-        
-        def process_action(idx):
-            if idx in processed:
-                return
-            action = create_blocks[idx]
-            parent_uid = action["location"]["parent-uid"]
-            # Process parent dependencies first
-            if parent_uid.startswith("temp_") and parent_uid in dependency_map:
-                for dep_idx in dependency_map[parent_uid]:
-                    if dep_idx != idx:  # Avoid circular dependencies
-                        process_action(dep_idx)
-            sorted_blocks.append(action)
-            processed.add(idx)
-        
-        # Process all actions
-        for i in range(len(create_blocks)):
-            process_action(i)
-            
-        optimized.extend(sorted_blocks)
-    
-    # Add remaining action types
-    optimized.extend(action_groups["update-block"])
-    optimized.extend(action_groups["delete-block"])
-    optimized.extend(action_groups["other"])
-    
-    return optimized
-
-
-def process_nested_content(content: List[Dict], parent_uid: str) -> List[str]:
-    """
-    Recursively process nested content structure and convert to Roam actions.
+    Recursively process nested content structure and create blocks.
     
     Args:
         content: List of content items with potential children
         parent_uid: UID of the parent block
+        session: Active session for API requests
+        headers: Request headers with authentication
+        graph_name: Roam graph name
         
     Returns:
         List of created block UIDs
     """
-    from roam_mcp.api import client
+    from roam_mcp.api import execute_batch_actions  # Import here to avoid circular imports
     
-    # Convert content dictionaries to MarkdownNode objects
-    nodes = []
-    for item in content:
-        node = MarkdownNode(
-            content=item.get("text", ""),
-            level=item.get("level", 0),
-            heading_level=item.get("heading_level", 0)
+    created_uids = []
+    batch_actions = []
+    
+    # First pass: create actions for all blocks in the hierarchy
+    def build_actions(items, parent_uid, index_start=0):
+        action_map = {}  # Maps item index to action index in batch_actions
+        
+        for i, block in enumerate(items, start=index_start):
+            # Extract heading level if present
+            heading_level = block.get("heading_level", 0)
+            
+            action = create_block_action(
+                parent_uid=parent_uid,
+                content=block["text"],
+                order=i,
+                heading=heading_level
+            )
+            
+            batch_actions.append(action)
+            action_map[i] = len(batch_actions) - 1
+            
+            # If the block has children, process them
+            children = block.get("children", [])
+            if children:
+                # Children will be processed after we get UIDs for parents
+                action_map.update(build_actions(children, f"TEMP_PARENT_{i}", len(action_map)))
+                
+        return action_map
+    
+    # Build initial actions
+    action_map = build_actions(content, parent_uid)
+    
+    # If there are no actions, return empty list
+    if not batch_actions:
+        return []
+    
+    # Execute actions in batches of 50
+    BATCH_SIZE = 50
+    for i in range(0, len(batch_actions), BATCH_SIZE):
+        chunk = batch_actions[i:i + BATCH_SIZE]
+        
+        # Execute batch
+        response = session.post(
+            f'https://api.roamresearch.com/api/graph/{graph_name}/write',
+            headers=headers,
+            json={"action": "batch-actions", "actions": chunk}
         )
-        nodes.append(node)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to create batch: {response.text}")
+            raise Exception(f"Failed to create blocks: {response.text}")
+        
+        # Get UIDs of created blocks
+        result = response.json()
+        if "created_uids" in result:
+            created_uids.extend(result["created_uids"])
     
-    # Generate actions from nodes
-    actions = nodes_to_roam_actions(nodes, parent_uid)
-    
-    # Optimize actions for best performance
-    optimized_actions = prepare_batch_actions(actions)
-    
-    # Execute batch actions
-    result = client.execute_batch_actions(optimized_actions)
-    
-    return result.get("created_uids", [])
+    return created_uids
 
 
-def topological_sort(actions: List[Dict[str, Any]], dependency_map: Dict[str, List[int]]) -> List[Dict[str, Any]]:
+def find_block_uid(session, headers, graph_name: str, block_content: str) -> str:
     """
-    Sort actions topologically to respect dependencies.
+    Search for a block by its content to find its UID.
     
     Args:
-        actions: List of actions to sort
-        dependency_map: Map of temporary UIDs to action indices that depend on them
+        session: Active session for API requests
+        headers: Request headers with authentication
+        graph_name: Roam graph name
+        block_content: Content to search for
         
     Returns:
-        Sorted list of actions
+        Block UID
     """
-    sorted_actions = []
-    visited = set()
-    temp_visited = set()
+    # Escape quotes in content
+    escaped_content = block_content.replace('"', '\\"')
     
-    def visit(idx):
-        if idx in visited:
-            return
-        if idx in temp_visited:
-            # Circular dependency detected
-            logger.warning(f"Circular dependency detected in action {idx}")
-            return
-        
-        temp_visited.add(idx)
-        
-        # Visit dependencies
-        action = actions[idx]
-        if action["action"] == "create-block":
-            parent_uid = action["location"]["parent-uid"]
-            if parent_uid.startswith("temp_") and parent_uid in dependency_map:
-                for dep_idx in dependency_map[parent_uid]:
-                    if dep_idx != idx:  # Avoid self-dependencies
-                        visit(dep_idx)
-        
-        temp_visited.remove(idx)
-        visited.add(idx)
-        sorted_actions.append(action)
+    search_query = f'''[:find (pull ?e [:block/uid])
+                      :where [?e :block/string "{escaped_content}"]]'''
     
-    for i in range(len(actions)):
-        if i not in visited:
-            visit(i)
+    search_response = session.post(
+        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+        headers=headers,
+        json={"query": search_query}
+    )
     
-    return sorted_actions
+    if search_response.status_code == 200 and search_response.json().get('result'):
+        try:
+            block_uid = search_response.json()['result'][0][0][':block/uid']
+            return block_uid
+        except (KeyError, IndexError):
+            logger.error("Unexpected response format when finding block UID")
+            raise Exception("Failed to find the block UID due to unexpected response format")
+    else:
+        # Try a more relaxed search if we can't find an exact match
+        # This can happen if there are subtle whitespace or formatting differences
+        logger.debug(f"Exact block match not found, trying a more relaxed search")
+        try:
+            # Get a list of recent blocks sorted by creation time
+            time_query = f'''[:find ?uid ?string ?time
+                             :where [?b :block/string ?string]
+                                    [?b :block/uid ?uid]
+                                    [?b :create/time ?time]]
+                             :order :desc
+                             :limit 5'''
+            
+            time_response = session.post(
+                f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+                headers=headers,
+                json={"query": time_query}
+            )
+            
+            if time_response.status_code == 200 and time_response.json().get('result'):
+                # Check if any of these recent blocks match our content
+                clean_content = block_content.strip()
+                for uid, content, time in time_response.json()['result']:
+                    if content.strip() == clean_content:
+                        return uid
+            
+            logger.error("Could not find block UID with relaxed search")
+            raise Exception("Failed to find the block UID even with relaxed search")
+        except Exception as e:
+            logger.error(f"Error in relaxed block search: {str(e)}")
+            raise Exception(f"Failed to find the block UID: {str(e)}")
 
 
-def update_parent_uids(actions: List[Dict[str, Any]], uid_mapping: Dict[str, str]) -> None:
+def find_page_by_title(session, headers, graph_name: str, title: str) -> Optional[str]:
     """
-    Update parent UIDs in actions based on mapping.
+    Find a page by title, with case-insensitive matching.
     
     Args:
-        actions: List of actions to update
-        uid_mapping: Map of temporary UIDs to real UIDs
+        session: Active session for API requests
+        headers: Request headers with authentication
+        graph_name: Roam graph name
+        title: Page title to search for
+        
+    Returns:
+        Page UID or None if not found
     """
-    for action in actions:
-        if action["action"] == "create-block":
-            parent_uid = action["location"]["parent-uid"]
-            if parent_uid in uid_mapping:
-                action["location"]["parent-uid"] = uid_mapping[parent_uid]
+    # Clean up the title
+    title = title.strip()
+    
+    # First try direct page lookup (more reliable than case-insensitive queries in Roam)
+    query = f'''[:find ?uid .
+                :where [?e :node/title "{title}"]
+                        [?e :block/uid ?uid]]'''
+    
+    response = session.post(
+        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+        headers=headers,
+        json={"query": query}
+    )
+    
+    if response.status_code == 200 and response.json().get('result'):
+        return response.json()['result']
+    
+    # If not found, try checking if it's a UID
+    if len(title) == 9 and re.match(r'^[a-zA-Z0-9_-]{9}$', title):
+        # This looks like a UID, check if it's a valid page UID
+        uid_query = f'''[:find ?title .
+                        :where [?e :block/uid "{title}"]
+                                [?e :node/title ?title]]'''
+        
+        uid_response = session.post(
+            f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+            headers=headers,
+            json={"query": uid_query}
+        )
+        
+        if uid_response.status_code == 200 and uid_response.json().get('result'):
+            return title
+    
+    # If still not found, try case-insensitive match by getting all pages
+    all_pages_query = f'''[:find ?title ?uid
+                         :where [?e :node/title ?title]
+                                 [?e :block/uid ?uid]]'''
+    
+    all_pages_response = session.post(
+        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+        headers=headers,
+        json={"query": all_pages_query}
+    )
+    
+    if all_pages_response.status_code == 200 and all_pages_response.json().get('result'):
+        for page_title, uid in all_pages_response.json()['result']:
+            if page_title.lower() == title.lower():
+                return uid
+    
+    return None
 
 
-def update_uid_mapping(uid_mapping: Dict[str, str], actions: List[Dict[str, Any]], 
-                       created_uids: List[str]) -> None:
+def resolve_block_references(session, headers, graph_name: str, content: str, max_depth: int = 3, current_depth: int = 0) -> str:
     """
-    Update UID mapping with newly created UIDs.
+    Resolve block references in content recursively.
     
     Args:
-        uid_mapping: Map of temporary UIDs to real UIDs
-        actions: List of actions that were executed
-        created_uids: List of UIDs that were created
+        session: Active session for API requests
+        headers: Request headers with authentication
+        graph_name: Roam graph name
+        content: Content with potential block references
+        max_depth: Maximum recursion depth
+        current_depth: Current recursion depth
+        
+    Returns:
+        Content with block references resolved
     """
-    # Map temporary UIDs to real UIDs
-    for i, uid in enumerate(created_uids):
-        if i < len(actions):
-            action = actions[i]
-            if action["action"] == "create-block":
-                # Generate temp_uid from action index
-                temp_uid = f"temp_{i}"
-                uid_mapping[temp_uid] = uid
+    if current_depth >= max_depth:
+        return content
+    
+    # Find all block references
+    ref_pattern = r'\(\(([a-zA-Z0-9_-]{9})\)\)'
+    refs = re.findall(ref_pattern, content)
+    
+    if not refs:
+        return content
+    
+    # For each reference, get its content
+    for ref in refs:
+        try:
+            query = f'''[:find ?string .
+                        :where [?b :block/uid "{ref}"]
+                                [?b :block/string ?string]]'''
+            
+            response = session.post(
+                f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+                headers=headers,
+                json={"query": query}
+            )
+            
+            if response.status_code == 200 and response.json().get('result'):
+                ref_content = response.json()['result']
+                
+                # Recursively resolve nested references
+                resolved_ref = resolve_block_references(
+                    session, headers, graph_name, 
+                    ref_content, max_depth, current_depth + 1
+                )
+                
+                # Replace reference with content
+                content = content.replace(f"(({ref}))", resolved_ref)
+        except Exception as e:
+            logger.warning(f"Failed to resolve reference (({ref})): {str(e)}")
+    
+    return content
