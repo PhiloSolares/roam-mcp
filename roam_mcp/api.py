@@ -430,18 +430,41 @@ def execute_batch_actions(actions: List[Dict[str, Any]], chunk_size: int = 50) -
             for action in chunk:
                 if action["action"] == "create-block":
                     parent_uid = action["location"]["parent-uid"]
-                    if parent_uid.startswith("temp_") and parent_uid in temp_uid_map:
-                        action["location"]["parent-uid"] = temp_uid_map[parent_uid]
+                    if isinstance(parent_uid, str) and parent_uid.startswith("temp_"):
+                        # Handle both temp_i and temp_i_j formats
+                        # First check for exact match
+                        if parent_uid in temp_uid_map:
+                            action["location"]["parent-uid"] = temp_uid_map[parent_uid]
+                        else:
+                            # If not found, try to extract the numeric part
+                            try:
+                                # Extract index from temp_X format
+                                if "_" in parent_uid:
+                                    idx = int(parent_uid.split("_")[1])
+                                    if idx < len(combined_results["created_uids"]):
+                                        action["location"]["parent-uid"] = combined_results["created_uids"][idx]
+                            except (ValueError, IndexError):
+                                # If extraction fails, keep original temp value
+                                # (will be handled by Roam API's batch processing)
+                                pass
         
         result = execute_write_action(chunk)
         
         # Collect UIDs from this chunk
         if "created_uids" in result:
             # Map temp UIDs to real UIDs for next chunks
-            if i < len(chunks) - 1:
-                for j, uid in enumerate(result["created_uids"]):
-                    temp_key = f"temp_{i}_{j}"
-                    temp_uid_map[temp_key] = uid
+            for j, uid in enumerate(result["created_uids"]):
+                # Create both simple and compound temp keys
+                temp_key_simple = f"temp_{j}"
+                temp_key_compound = f"temp_{i}_{j}"
+                
+                # Store mappings for both formats
+                temp_uid_map[temp_key_simple] = uid
+                temp_uid_map[temp_key_compound] = uid
+                
+                # Also store by index for blocks without explicit temp IDs
+                current_idx = len(combined_results["created_uids"])
+                temp_uid_map[f"temp_{current_idx}"] = uid
             
             combined_results["created_uids"].extend(result["created_uids"])
     

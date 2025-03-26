@@ -60,52 +60,94 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
         
         # Add content if provided
         if content:
-            # First, validate content structure
-            invalid_items = [
-                item for item in content 
-                if not isinstance(item.get("text"), str) or not isinstance(item.get("level"), int)
-            ]
+            # Check if content is using the "children" format and convert to flat structure with levels
+            flattened_content = []
             
-            if invalid_items:
-                return {
-                    "success": False,
-                    "error": "Invalid content structure - each item must have text (string) and level (integer)"
-                }
+            def flatten_nested_content(items, parent_level=0):
+                for item in items:
+                    # Ensure each item has text
+                    if not isinstance(item.get("text"), str):
+                        continue
+                    
+                    # Calculate item level
+                    if "level" in item:
+                        level = item["level"]
+                    else:
+                        level = parent_level
+                    
+                    # Add to flattened list
+                    flattened_item = {
+                        "text": item["text"],
+                        "level": level
+                    }
+                    
+                    # Include heading_level if present
+                    if "heading_level" in item and isinstance(item["heading_level"], int):
+                        flattened_item["heading_level"] = item["heading_level"]
+                    
+                    flattened_content.append(flattened_item)
+                    
+                    # Process children if any
+                    if "children" in item and isinstance(item["children"], list):
+                        flatten_nested_content(item["children"], level + 1)
+            
+            # If there's at least one item with children, process as nested format
+            has_nested_format = any("children" in item for item in content)
+            
+            if has_nested_format:
+                flatten_nested_content(content)
+                processed_content = flattened_content
+            else:
+                processed_content = content
+                
+                # First, validate content structure for non-nested format
+                invalid_items = [
+                    item for item in processed_content
+                    if not isinstance(item.get("text"), str) or not isinstance(item.get("level", 0), int)
+                ]
+                
+                if invalid_items:
+                    return {
+                        "success": False,
+                        "error": "Invalid content structure - each item must have text (string) and level (integer)"
+                    }
             
             # Check for invalid level jumps
             prev_level = 0
-            for item in content:
+            for item in processed_content:
                 level = item["level"]
                 if level > prev_level + 1:
                     return {
                         "success": False,
                         "error": f"Invalid content structure - level {level} follows level {prev_level}"
                     }
-                prev_level = level
+                prev_level = level if level > prev_level else prev_level
             
             # Create batch of create-block actions
             actions = []
             parent_map = {0: page_uid}
             
-            for i, item in enumerate(content):
+            for i, item in enumerate(processed_content):
                 level = item["level"]
                 text = item["text"]
                 heading = item.get("heading_level", 0)
                 
-                parent_uid = parent_map.get(level - 1, page_uid)
+                # Find parent for this level
+                parent_level = level - 1 if level > 0 else 0
+                parent_uid = parent_map.get(parent_level, page_uid)
                 
                 # Create block
                 action = create_block_action(
                     parent_uid=parent_uid,
                     content=text,
-                    order=i,
+                    order="last",  # Use "last" to maintain order as items are added
                     heading=heading
                 )
                 
                 actions.append(action)
                 
                 # Generate a temporary UID for this block for reference by children
-                temp_uid = f"temp_uid_{i}"
+                temp_uid = f"temp_{i}"
                 parent_map[level] = temp_uid
             
             # Submit batch request
