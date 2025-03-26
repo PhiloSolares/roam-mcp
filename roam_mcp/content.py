@@ -344,7 +344,7 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
             }
             
             result = execute_write_action(action_data)
-if result.get("success", False):
+            if result.get("success", False):
                 # Verify the block exists after a brief delay
                 time.sleep(1)
                 found_uid = find_block_uid(session, headers, GRAPH_NAME, content)
