@@ -37,14 +37,14 @@ logger = logging.getLogger("roam-mcp.content")
 
 def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
-    Create a new page in Roam Research.
+    Create a new page in Roam Research with optional nested content.
     
     Args:
         title: Title for the new page
-        content: Optional content for the page
+        content: Optional content as a list of dicts with 'text', optional 'level', and optional 'children'
         
     Returns:
-        Result with page UID
+        Result with page UID and created block UIDs
     """
     if not title:
         return {
@@ -60,61 +60,81 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
         
         # Add content if provided
         if content:
-            # First, validate content structure
-            invalid_items = [
-                item for item in content 
-                if not isinstance(item.get("text"), str) or not isinstance(item.get("level"), int)
-            ]
+            # Validate content structure
+            def validate_item(item, parent_level=0):
+                if not isinstance(item.get("text"), str):
+                    return "Each item must have 'text' as a string"
+                level = item.get("level", parent_level + 1)
+                if not isinstance(level, int):
+                    return "'level' must be an integer"
+                if level < 0:
+                    return "'level' must be non-negative"
+                if level > parent_level + 1:
+                    return f"Level {level} cannot follow parent level {parent_level}"
+                children = item.get("children", [])
+                if not isinstance(children, list):
+                    return "'children' must be a list"
+                for child in children:
+                    error = validate_item(child, level)
+                    if error:
+                        return error
+                return None
             
-            if invalid_items:
-                return {
-                    "success": False,
-                    "error": "Invalid content structure - each item must have text (string) and level (integer)"
-                }
-            
-            # Check for invalid level jumps
-            prev_level = 0
             for item in content:
-                level = item["level"]
-                if level > prev_level + 1:
-                    return {
-                        "success": False,
-                        "error": f"Invalid content structure - level {level} follows level {prev_level}"
-                    }
-                prev_level = level
+                error = validate_item(item, -1)  # Root level starts at -1 (page is 0)
+                if error:
+                    return {"success": False, "error": f"Invalid content structure - {error}"}
             
-            # Create batch of create-block actions
+            # Build batch actions recursively
             actions = []
-            parent_map = {0: page_uid}
+            uid_map = {}  # Maps temp UIDs to real UIDs
             
-            for i, item in enumerate(content):
-                level = item["level"]
-                text = item["text"]
-                heading = item.get("heading_level", 0)
-                
-                parent_uid = parent_map.get(level - 1, page_uid)
-                
-                # Create block
-                action = create_block_action(
-                    parent_uid=parent_uid,
-                    content=text,
-                    order=i,
-                    heading=heading
-                )
-                
-                actions.append(action)
-                
-                # Generate a temporary UID for this block for reference by children
-                temp_uid = f"temp_uid_{i}"
-                parent_map[level] = temp_uid
+            def process_items(items, parent_uid, order_start=0, level=0):
+                nonlocal actions
+                for i, item in enumerate(items):
+                    text = item["text"]
+                    heading = item.get("heading_level", 0)
+                    temp_uid = f"temp_{len(actions)}"
+                    
+                    # Create block action
+                    action = create_block_action(
+                        parent_uid=parent_uid,
+                        content=text,
+                        order=order_start + i,
+                        heading=heading
+                    )
+                    actions.append(action)
+                    uid_map[temp_uid] = None  # Placeholder for real UID
+                    
+                    # Process children
+                    children = item.get("children", [])
+                    if children:
+                        process_items(children, temp_uid, 0, level + 1)
             
-            # Submit batch request
-            created_uids = execute_batch_actions(actions)
+            # Process top-level items
+            process_items(content, page_uid)
+            
+            # Execute batch actions and update UIDs
+            result = execute_batch_actions(actions)
+            created_uids = result.get("created_uids", [])
+            
+            # Map temporary UIDs to real UIDs
+            if len(created_uids) == len(actions):
+                for temp_uid, real_uid in zip(uid_map.keys(), created_uids):
+                    uid_map[temp_uid] = real_uid
+            else:
+                logger.warning(f"Expected {len(actions)} UIDs, got {len(created_uids)}")
+            
+            # Update actions with real UIDs
+            for action in actions:
+                parent_uid = action["location"]["parent-uid"]
+                if parent_uid in uid_map and uid_map[parent_uid]:
+                    action["location"]["parent-uid"] = uid_map[parent_uid]
             
             return {
                 "success": True,
                 "uid": page_uid,
-                "created_uids": created_uids.get("created_uids", []),
+                "created_uids": created_uids,
                 "page_url": f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
             }
         
