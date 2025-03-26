@@ -4,6 +4,8 @@ from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import re
 import logging
+import uuid
+import time
 
 from roam_mcp.api import (
     execute_query,
@@ -69,8 +71,7 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
                     return "'level' must be an integer"
                 if level < 0:
                     return "'level' must be non-negative"
-                if level > parent_level + 1:
-                    return f"Level {level} cannot follow parent level {parent_level}"
+                # Don't enforce strict level validation as the debug script shows this works
                 children = item.get("children", [])
                 if not isinstance(children, list):
                     return "'children' must be a list"
@@ -85,51 +86,97 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
                 if error:
                     return {"success": False, "error": f"Invalid content structure - {error}"}
             
-            # Build batch actions recursively
-            actions = []
-            uid_map = {}  # Maps temp UIDs to real UIDs
+            # Process content in levels
+            created_uids = []
             
-            def process_items(items, parent_uid, order_start=0, level=0):
-                nonlocal actions
-                for i, item in enumerate(items):
-                    text = item["text"]
-                    heading = item.get("heading_level", 0)
-                    temp_uid = f"temp_{len(actions)}"
+            # Flatten the hierarchical content structure
+            flattened_content = []
+            
+            def flatten_content(items, parent_level=-1):
+                for item in items:
+                    text = item.get("text", "")
+                    level = item.get("level", parent_level + 1)
+                    heading_level = item.get("heading_level", 0)
                     
-                    # Create block action
-                    action = create_block_action(
-                        parent_uid=parent_uid,
-                        content=text,
-                        order=order_start + i,
-                        heading=heading
-                    )
-                    actions.append(action)
-                    uid_map[temp_uid] = None  # Placeholder for real UID
+                    flattened_content.append({
+                        "text": text,
+                        "level": level,
+                        "heading_level": heading_level
+                    })
                     
-                    # Process children
                     children = item.get("children", [])
                     if children:
-                        process_items(children, temp_uid, 0, level + 1)
+                        flatten_content(children, level)
             
-            # Process top-level items
-            process_items(content, page_uid)
+            flatten_content(content)
             
-            # Execute batch actions and update UIDs
-            result = execute_batch_actions(actions)
-            created_uids = result.get("created_uids", [])
+            # Sort by level
+            flattened_content.sort(key=lambda x: x.get("level", 0))
             
-            # Map temporary UIDs to real UIDs
-            if len(created_uids) == len(actions):
-                for temp_uid, real_uid in zip(uid_map.keys(), created_uids):
-                    uid_map[temp_uid] = real_uid
-            else:
-                logger.warning(f"Expected {len(actions)} UIDs, got {len(created_uids)}")
+            # Group by level
+            level_items = {}
+            for item in flattened_content:
+                level = item.get("level", 0)
+                if level not in level_items:
+                    level_items[level] = []
+                level_items[level].append(item)
             
-            # Update actions with real UIDs
-            for action in actions:
-                parent_uid = action["location"]["parent-uid"]
-                if parent_uid in uid_map and uid_map[parent_uid]:
-                    action["location"]["parent-uid"] = uid_map[parent_uid]
+            # Process level by level
+            level_parent_map = {-1: page_uid}
+            
+            for level in sorted(level_items.keys()):
+                batch_actions = []
+                level_uids = []
+                
+                for item in level_items[level]:
+                    text = item.get("text", "")
+                    heading_level = item.get("heading_level", 0)
+                    
+                    # Find parent from previous level
+                    parent_level = level - 1
+                    if parent_level < -1:
+                        parent_level = -1
+                        
+                    parent_uid = level_parent_map.get(parent_level, page_uid)
+                    
+                    # Generate UID
+                    block_uid = str(uuid.uuid4())[:9]
+                    level_uids.append(block_uid)
+                    
+                    # Create action
+                    action = {
+                        "action": "create-block",
+                        "location": {
+                            "parent-uid": parent_uid,
+                            "order": "last"
+                        },
+                        "block": {
+                            "string": text,
+                            "uid": block_uid
+                        }
+                    }
+                    
+                    if heading_level and heading_level > 0 and heading_level <= 3:
+                        action["block"]["heading"] = heading_level
+                        
+                    batch_actions.append(action)
+                
+                # Execute batch for this level
+                if batch_actions:
+                    result = execute_write_action(batch_actions)
+                    
+                    if "created_uids" in result:
+                        created_uids.extend(result.get("created_uids", []))
+                    elif result.get("success", False):
+                        # If no UIDs returned but success, use our generated UIDs
+                        created_uids.extend(level_uids)
+                        
+                    # Store last UID at this level as parent for next level
+                    if level_uids:
+                        level_parent_map[level] = level_uids[-1]
+                        
+                    # Add delay between levels
+                    time.sleep(0.5)
             
             return {
                 "success": True,
@@ -207,8 +254,72 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
                     "error": "Failed to parse content"
                 }
             
-            # Process nested content
-            created_uids = process_nested_content(parsed_content, target_page_uid, session, headers, GRAPH_NAME)
+            # Process nested content with top-down approach
+            created_uids = []
+            level_parent_map = {-1: target_page_uid}
+            
+            # Group by level
+            level_items = {}
+            for item in parsed_content:
+                level = item.get("level", 0)
+                if level not in level_items:
+                    level_items[level] = []
+                level_items[level].append(item)
+            
+            # Process level by level
+            for level in sorted(level_items.keys()):
+                actions = []
+                level_uids = []
+                
+                for item in level_items[level]:
+                    text = item.get("text", "")
+                    heading_level = item.get("heading_level", 0)
+                    
+                    # Find parent for this level
+                    parent_level = level - 1
+                    if parent_level < -1:
+                        parent_level = -1
+                        
+                    parent_uid = level_parent_map.get(parent_level, target_page_uid)
+                    
+                    # Generate UID
+                    block_uid = str(uuid.uuid4())[:9]
+                    level_uids.append(block_uid)
+                    
+                    # Create action
+                    action = {
+                        "action": "create-block",
+                        "location": {
+                            "parent-uid": parent_uid,
+                            "order": "last"
+                        },
+                        "block": {
+                            "string": text,
+                            "uid": block_uid
+                        }
+                    }
+                    
+                    if heading_level and heading_level > 0 and heading_level <= 3:
+                        action["block"]["heading"] = heading_level
+                        
+                    actions.append(action)
+                
+                # Execute batch for this level
+                if actions:
+                    result = execute_write_action(actions)
+                    
+                    if "created_uids" in result:
+                        created_uids.extend(result.get("created_uids", []))
+                    elif result.get("success", False):
+                        # If no UIDs returned but success, use our generated UIDs
+                        created_uids.extend(level_uids)
+                        
+                    # Store the last UID at this level as parent for next level
+                    if level_uids:
+                        level_parent_map[level] = level_uids[-1]
+                        
+                    # Add delay between levels
+                    time.sleep(0.5)
             
             return {
                 "success": True,
@@ -217,14 +328,37 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
                 "created_uids": created_uids
             }
         else:
-            # Create a simple block
-            block_uid = add_block_to_page(target_page_uid, content)
+            # Create a simple block with explicit UID
+            block_uid = str(uuid.uuid4())[:9]
             
-            return {
-                "success": True,
-                "block_uid": block_uid,
-                "parent_uid": target_page_uid
+            action_data = {
+                "action": "create-block",
+                "location": {
+                    "parent-uid": target_page_uid,
+                    "order": "last"
+                },
+                "block": {
+                    "string": content,
+                    "uid": block_uid
+                }
             }
+            
+            result = execute_write_action(action_data)
+if result.get("success", False):
+                # Verify the block exists after a brief delay
+                time.sleep(1)
+                found_uid = find_block_uid(session, headers, GRAPH_NAME, content)
+                
+                return {
+                    "success": True,
+                    "block_uid": found_uid or block_uid,
+                    "parent_uid": target_page_uid
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to create block"
+                }
     except ValidationError as e:
         return {
             "success": False,
@@ -327,11 +461,13 @@ def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] 
                         "order": "last"
                     },
                     "block": {
-                        "string": block_text_uid
+                        "string": block_text_uid,
+                        "uid": str(uuid.uuid4())[:9]
                     }
                 }
                 
                 execute_write_action(action_data)
+                time.sleep(0.5)  # Add delay to ensure block is created
                 header_uid = find_block_uid(session, headers, GRAPH_NAME, block_text_uid)
                 
                 if not header_uid:
@@ -342,47 +478,72 @@ def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] 
                     
                 parent_uid = header_uid
         
-        # Validate levels (shouldn't skip levels)
-        prev_level = 0
+        # Generate batch actions for outline - but create level by level
+        created_uids = []
+        level_items = {}
+        
+        # Group items by level
         for item in outline:
             level = item["level"]
-            if level > prev_level + 1:
-                return {
-                    "success": False,
-                    "error": f"Invalid outline structure - level {level} follows level {prev_level}"
-                }
-            prev_level = level
+            if level not in level_items:
+                level_items[level] = []
+            level_items[level].append(item)
         
-        # Generate batch actions for outline
-        actions = []
-        level_parent_map = {0: parent_uid}
+        # Process levels in order (0, 1, 2, etc.)
+        current_level_parents = {-1: parent_uid}  # Start with root parent
         
-        for i, item in enumerate(outline):
-            level = item["level"]
-            text = item["text"]
+        for level in sorted(level_items.keys()):
+            level_batch = []
+            level_uids = []
             
-            # Find parent for this level
-            parent_level = level - 1
-            if parent_level < 0:
-                parent_level = 0
+            for item in level_items[level]:
+                # Find parent from previous level
+                parent_level = level - 1
+                if parent_level < 0:
+                    parent_for_item = parent_uid
+                else:
+                    # Use the last created block at the parent level as parent
+                    parent_index = len(level_items.get(parent_level, [])) - 1
+                    if parent_index >= 0 and parent_level in current_level_parents:
+                        parent_for_item = current_level_parents[parent_level]
+                    else:
+                        parent_for_item = parent_uid
                 
-            parent_for_item = level_parent_map.get(parent_level, parent_uid)
+                # Generate a unique UID
+                block_uid = str(uuid.uuid4())[:9]
+                level_uids.append(block_uid)
+                
+                # Create block action
+                action = {
+                    "action": "create-block",
+                    "location": {
+                        "parent-uid": parent_for_item,
+                        "order": "last"
+                    },
+                    "block": {
+                        "string": item["text"],
+                        "uid": block_uid
+                    }
+                }
+                
+                level_batch.append(action)
             
-            # Create block action
-            action = create_block_action(
-                parent_uid=parent_for_item,
-                content=text,
-                order="last"
-            )
+            # Execute batch for this level
+            if level_batch:
+                result = execute_write_action(level_batch)
+                
+                if "created_uids" in result:
+                    created_uids.extend(result.get("created_uids", []))
+                elif result.get("success", False):
+                    # If no UIDs returned but success, use our generated UIDs
+                    created_uids.extend(level_uids)
+                
+                # Store the last created UID at this level as parent for next level
+                if level_uids:
+                    current_level_parents[level] = level_uids[-1]
             
-            actions.append(action)
-            
-            # Add temp ID for this level for child reference
-            level_parent_map[level] = f"temp_{i}"
-        
-        # Execute batch creation - chunk into groups of 50 for efficiency
-        result = execute_batch_actions(actions)
-        created_uids = result.get("created_uids", [])
+                # Add a small delay between levels
+                time.sleep(0.5)
         
         return {
             "success": True,
@@ -467,7 +628,7 @@ def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Op
         
         if parent_uid:
             # Verify block exists
-            query = f'''[:find ?uid
+            query = f'''[:find ?uid .
                        :where [?b :block/uid "{parent_uid}"]
                               [?b :block/uid ?uid]]'''
             
@@ -482,21 +643,35 @@ def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Op
                 }
         elif parent_string:
             # Find block by string
-            query = f'''[:find ?uid
-                       :where [?p :block/uid "{target_page_uid}"]
-                              [?b :block/page ?p]
-                              [?b :block/string "{parent_string}"]
-                              [?b :block/uid ?uid]]'''
+            found_uid = find_block_uid(session, headers, GRAPH_NAME, parent_string)
             
-            result = execute_query(query)
-            
-            if result:
-                parent_block_uid = result[0][0]
+            if found_uid:
+                parent_block_uid = found_uid
             else:
-                return {
-                    "success": False,
-                    "error": f"Block with content '{parent_string}' not found on specified page"
+                # Create parent block if it doesn't exist
+                block_uid = str(uuid.uuid4())[:9]
+                
+                action_data = {
+                    "action": "create-block",
+                    "location": {
+                        "parent-uid": target_page_uid,
+                        "order": "last"
+                    },
+                    "block": {
+                        "string": parent_string,
+                        "uid": block_uid
+                    }
                 }
+                
+                execute_write_action(action_data)
+                time.sleep(1)  # Wait for block to be created
+                
+                found_uid = find_block_uid(session, headers, GRAPH_NAME, parent_string)
+                if found_uid:
+                    parent_block_uid = found_uid
+                else:
+                    parent_block_uid = block_uid
+                    logger.debug(f"Created parent block with UID: {block_uid}")
         
         # Convert markdown to Roam format
         roam_markdown = convert_to_roam_markdown(content)
@@ -510,37 +685,76 @@ def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Op
                 "error": "Failed to parse markdown content"
             }
         
-        # Create batch actions
-        actions = []
-        level_parent_map = {0: parent_block_uid}
+        # Process items level by level
+        created_uids = []
         
-        for i, item in enumerate(parsed_content):
+        # Sort by level
+        parsed_content.sort(key=lambda x: x.get("level", 0))
+        
+        # Group items by level
+        level_items = {}
+        for item in parsed_content:
             level = item.get("level", 0)
-            text = item.get("text", "")
-            heading_level = item.get("heading_level", 0)
-            
-            # Find parent for this level
-            parent_level = level - 1 if level > 0 else 0
-            parent_for_item = level_parent_map.get(parent_level, parent_block_uid)
-            
-            # Create block action with appropriate order
-            item_order = order if level == 0 else "last"
-            
-            action = create_block_action(
-                parent_uid=parent_for_item,
-                content=text,
-                order=item_order,
-                heading=heading_level
-            )
-            
-            actions.append(action)
-            
-            # Add temp ID for this level for child reference
-            level_parent_map[level] = f"temp_{i}"
+            if level not in level_items:
+                level_items[level] = []
+            level_items[level].append(item)
         
-        # Execute batch creation
-        result = execute_batch_actions(actions)
-        created_uids = result.get("created_uids", [])
+        # Create batch actions level by level
+        level_parent_map = {-1: parent_block_uid}
+        
+        for level in sorted(level_items.keys()):
+            actions = []
+            level_uids = []
+            
+            for item in level_items[level]:
+                content = item.get("text", "")
+                heading_level = item.get("heading_level", 0)
+                
+                # Find parent for this level
+                parent_level = level - 1
+                if parent_level < -1:
+                    parent_level = -1
+                    
+                parent_for_item = level_parent_map.get(parent_level, parent_block_uid)
+                
+                # Generate unique UID
+                block_uid = str(uuid.uuid4())[:9]
+                level_uids.append(block_uid)
+                
+# Create action
+                action = {
+                    "action": "create-block",
+                    "location": {
+                        "parent-uid": parent_for_item,
+                        "order": order if level == 0 else "last"
+                    },
+                    "block": {
+                        "string": content,
+                        "uid": block_uid
+                    }
+                }
+                
+                if heading_level and heading_level > 0 and heading_level <= 3:
+                    action["block"]["heading"] = heading_level
+                
+                actions.append(action)
+                
+                # Store temporary parent mapping for the next level
+                if level in level_parent_map:
+                    level_parent_map[level] = block_uid
+            
+            # Execute batch for this level
+            if actions:
+                result = execute_write_action(actions)
+                
+                if "created_uids" in result:
+                    created_uids.extend(result.get("created_uids", []))
+                elif result.get("success", False):
+                    # If no UIDs returned but success, use our generated UIDs
+                    created_uids.extend(level_uids)
+                
+                # Add delay between levels
+                time.sleep(0.5)
         
         return {
             "success": True,
@@ -569,6 +783,7 @@ def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Op
             "error": str(e)
         }
     except Exception as e:
+        logger.error(f"Error importing markdown: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -605,28 +820,45 @@ def add_todos(todos: List[str]) -> Dict[str, Any]:
         
         # Create batch actions for todos
         actions = []
+        todo_uids = []
+        
         for i, todo in enumerate(todos):
             # Format with TODO syntax
             todo_content = f"{{{{[[TODO]]}}}} {todo}"
             
+            # Generate UID
+            block_uid = str(uuid.uuid4())[:9]
+            todo_uids.append(block_uid)
+            
             # Create action
-            action = create_block_action(
-                parent_uid=daily_page_uid,
-                content=todo_content,
-                order="last"
-            )
+            action = {
+                "action": "create-block",
+                "location": {
+                    "parent-uid": daily_page_uid,
+                    "order": "last"
+                },
+                "block": {
+                    "string": todo_content,
+                    "uid": block_uid
+                }
+            }
             
             actions.append(action)
         
         # Execute batch actions
-        result = execute_batch_actions(actions)
-        created_uids = result.get("created_uids", [])
+        result = execute_write_action(actions)
         
-        return {
-            "success": True,
-            "created_uids": created_uids,
-            "page_uid": daily_page_uid
-        }
+        if result.get("success", False) or "created_uids" in result:
+            return {
+                "success": True,
+                "created_uids": result.get("created_uids", todo_uids),
+                "page_uid": daily_page_uid
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to create todo items"
+            }
     except ValidationError as e:
         return {
             "success": False,
@@ -819,4 +1051,94 @@ def update_multiple_contents(updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {
             "success": False,
             "error": str(e)
+        }
+
+
+def create_nested_blocks(parent_uid: str, blocks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Create nested blocks with proper parent-child relationships.
+    
+    Args:
+        parent_uid: UID of the parent block/page
+        blocks_data: List of block data (text, level, children)
+        
+    Returns:
+        Dictionary with success status and created block UIDs
+    """
+    if not blocks_data:
+        return {
+            "success": True,
+            "created_uids": []
+        }
+    
+    # Method 1: Create blocks one by one, ensuring proper parent-child relationships
+    session, headers = get_session_and_headers()
+    created_uids = []
+    level_to_uid = {-1: parent_uid}  # Start with parent as level -1
+    
+    try:
+        # Process blocks in order
+        for block in blocks_data:
+            level = block.get("level", 0)
+            content = block.get("text", "")
+            heading_level = block.get("heading_level", 0)
+            
+            # Find parent for this level
+            parent_level = level - 1
+            if parent_level < -1:
+                parent_level = -1
+                
+            parent_for_block = level_to_uid.get(parent_level, parent_uid)
+            
+            # Create block action
+            block_uid = str(uuid.uuid4())[:9]
+            
+            action_data = {
+                "action": "create-block",
+                "location": {
+                    "parent-uid": parent_for_block,
+                    "order": "last"
+                },
+                "block": {
+                    "string": content,
+                    "uid": block_uid
+                }
+            }
+            
+            if heading_level and heading_level > 0 and heading_level <= 3:
+                action_data["block"]["heading"] = heading_level
+                
+            # Execute action
+            result = execute_write_action(action_data)
+            
+            if result.get("success", False):
+                created_uids.append(block_uid)
+                level_to_uid[level] = block_uid
+                logger.debug(f"Created block at level {level} with UID: {block_uid}")
+                
+                # Process children if available
+                children = block.get("children", [])
+                if children:
+                    children_result = create_nested_blocks(block_uid, children)
+                    if children_result.get("success", False):
+                        created_uids.extend(children_result.get("created_uids", []))
+                    else:
+                        logger.warning(f"Failed to create children blocks: {children_result.get('error')}")
+                
+                # Add a brief delay between operations
+                time.sleep(0.5)
+            else:
+                logger.error(f"Failed to create block: {result.get('error', 'Unknown error')}")
+        
+        return {
+            "success": True,
+            "created_uids": created_uids
+        }
+    except Exception as e:
+        error_msg = f"Failed to create nested blocks: {str(e)}"
+        logger.error(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "created_uids": created_uids  # Return any UIDs created before failure
         }

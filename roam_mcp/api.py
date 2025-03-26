@@ -337,13 +337,19 @@ def execute_write_action(action_data: Union[Dict[str, Any], List[Dict[str, Any]]
         logger.debug(f"Executing write action: {action_type}")
         operation_data = action_data
     
+    # Debug log the operation data
+    logger.debug(f"Sending data: {json.dumps(operation_data)[:100]}...")
+    
     # Execute action
     try:
         response = session.post(
             f'https://api.roamresearch.com/api/graph/{GRAPH_NAME}/write',
             headers=headers,
-            json=operation_data
+            json=operation_data  # Use json parameter for proper JSON encoding
         )
+        
+        logger.debug(f"Status code: {response.status_code}")
+        logger.debug(f"Response headers: {dict(response.headers)}")
         
         if response.status_code == 401:
             raise AuthenticationError("Authentication failed", {"status_code": response.status_code})
@@ -351,20 +357,38 @@ def execute_write_action(action_data: Union[Dict[str, Any], List[Dict[str, Any]]
         if response.status_code == 429:
             raise RateLimitError("Rate limit exceeded", {"status_code": response.status_code})
         
-        response.raise_for_status()
-        result = response.json()
+        # Special handling for empty responses
+        if response.status_code == 200 and not response.text:
+            logger.debug("Received empty response with status 200 (success)")
+            return {"success": True}
         
-        # Validate response for batch operations
-        if is_batch and "successful" in result:
-            if not result["successful"]:
-                error_details = {"failed_actions": result.get("failed_actions", [])}
+        response.raise_for_status()
+        
+        # Try to parse JSON response
+        try:
+            result = response.json()
+            logger.debug(f"Response: {json.dumps(result)[:500]}")
+            
+            # Success even with error message for batch operations that partly succeed
+            if "batch-error-message" in result and "num-actions-successfully-transacted-before-failure" in result:
+                num_success = result.get("num-actions-successfully-transacted-before-failure", 0)
+                logger.debug(f"Batch partially succeeded with {num_success} actions before failure")
+                return result
+            
+            return result
+        except json.JSONDecodeError:
+            # Some successful operations return empty responses
+            if 200 <= response.status_code < 300:
+                logger.debug("Success with non-JSON response")
+                return {"success": True}
+            else:
+                logger.debug(f"Failed to parse response as JSON: {response.text[:500]}")
                 raise TransactionError(
-                    f"Batch operation failed: {len(error_details['failed_actions'])} actions failed",
+                    f"Failed to parse response as JSON",
                     action_type,
-                    error_details
+                    {"response_text": response.text[:500]}
                 )
-                
-        return result
+            
     except requests.RequestException as e:
         error_details = {}
         
@@ -406,7 +430,15 @@ def execute_batch_actions(actions: List[Dict[str, Any]], chunk_size: int = 50) -
     
     # Single batch if under chunk size
     if len(actions) <= chunk_size:
-        return execute_write_action(actions)
+        result = execute_write_action(actions)
+        
+        # Check for tempids-to-uids mapping in response
+        if "tempids-to-uids" in result:
+            return {"success": True, "created_uids": list(result["tempids-to-uids"].values())}
+        elif "successful" in result and result["successful"]:
+            return {"success": True, "created_uids": []}
+        else:
+            return result
     
     # Split into chunks for larger batches
     chunks = [actions[i:i + chunk_size] for i in range(0, len(actions), chunk_size)]
@@ -436,14 +468,22 @@ def execute_batch_actions(actions: List[Dict[str, Any]], chunk_size: int = 50) -
         result = execute_write_action(chunk)
         
         # Collect UIDs from this chunk
-        if "created_uids" in result:
+        created_uids = []
+        if "tempids-to-uids" in result:
+            created_uids = list(result["tempids-to-uids"].values())
+        
+        if created_uids:
             # Map temp UIDs to real UIDs for next chunks
             if i < len(chunks) - 1:
-                for j, uid in enumerate(result["created_uids"]):
+                for j, uid in enumerate(created_uids):
                     temp_key = f"temp_{i}_{j}"
                     temp_uid_map[temp_key] = uid
             
-            combined_results["created_uids"].extend(result["created_uids"])
+            combined_results["created_uids"].extend(created_uids)
+        
+        # Add delay between batches to ensure ordering
+        if i < len(chunks) - 1:
+            time.sleep(0.5)
     
     return combined_results
 
@@ -476,7 +516,11 @@ def find_or_create_page(title: str) -> str:
     
     # Try to find the page first
     logger.debug(f"Looking for page: {title}")
-    page_uid = find_page_by_title(session, headers, GRAPH_NAME, title)
+    query = f'''[:find ?uid .
+              :where [?e :node/title "{title}"]
+                     [?e :block/uid ?uid]]'''
+    
+    page_uid = execute_query(query)
     
     if page_uid:
         logger.debug(f"Found existing page: {title} (UID: {page_uid})")
@@ -492,20 +536,27 @@ def find_or_create_page(title: str) -> str:
     try:
         response = execute_write_action(action_data)
         
-        if "page" in response and "uid" in response["page"]:
-            new_uid = response["page"]["uid"]
-            logger.debug(f"Created page: {title} (UID: {new_uid})")
-            return new_uid
-        else:
-            # Try to find the page again - sometimes the API creates it but doesn't return the UID
-            page_uid = find_page_by_title(session, headers, GRAPH_NAME, title)
+        if response.get("success", False):
+            # Wait a moment for the page to be created
+            time.sleep(1)
+            
+            # Try to find the page again
+            page_uid = execute_query(query)
+            if page_uid:
+                logger.debug(f"Created page: {title} (UID: {page_uid})")
+                return page_uid
+                
+            # If still not found, try one more time with a longer delay
+            time.sleep(2)
+            page_uid = execute_query(query)
             if page_uid:
                 logger.debug(f"Found newly created page: {title} (UID: {page_uid})")
                 return page_uid
             
-            error_msg = f"Failed to create page: {title}"
-            logger.error(error_msg)
-            raise TransactionError(error_msg, "create-page", {"title": title, "response": response})
+        # If we get here, something went wrong
+        error_msg = f"Failed to create page: {title}"
+        logger.error(error_msg)
+        raise TransactionError(error_msg, "create-page", {"title": title, "response": response})
     except TransactionError:
         # Rethrow existing TransactionError
         raise
@@ -532,7 +583,7 @@ def get_daily_page() -> str:
     return find_or_create_page(date_str)
 
 
-def add_block_to_page(page_uid: str, content: str, order: Union[int, str] = "last") -> str:
+def add_block_to_page(page_uid: str, content: str, order: Union[int, str] = "last") -> Optional[str]:
     """
     Add a block to a page.
     
@@ -542,7 +593,7 @@ def add_block_to_page(page_uid: str, content: str, order: Union[int, str] = "las
         order: Position ("first", "last", or integer index)
         
     Returns:
-        New block UID
+        New block UID or None if creation failed
         
     Raises:
         BlockNotFoundError: If page does not exist
@@ -556,6 +607,10 @@ def add_block_to_page(page_uid: str, content: str, order: Union[int, str] = "las
     if not content:
         raise ValidationError("Block content cannot be empty", "content")
     
+    # Generate a unique block UID
+    import uuid
+    block_uid = str(uuid.uuid4())[:9]
+    
     action_data = {
         "action": "create-block",
         "location": {
@@ -563,23 +618,33 @@ def add_block_to_page(page_uid: str, content: str, order: Union[int, str] = "las
             "order": order
         },
         "block": {
-            "string": content
+            "string": content,
+            "uid": block_uid
         }
     }
     
     logger.debug(f"Adding block to page {page_uid}")
     try:
-        execute_write_action(action_data)
+        result = execute_write_action(action_data)
         
-        session, headers = get_session_and_headers()
-        uid = find_block_uid(session, headers, GRAPH_NAME, content)
-        
-        if not uid:
-            raise BlockNotFoundError(f"Newly created block with content: {content[:50]}...")
+        if result.get("success", False):
+            # Add a brief delay to ensure the block is created
+            time.sleep(1)
             
-        logger.debug(f"Created block with UID: {uid}")
-        
-        return uid
+            # Verify the block exists
+            session, headers = get_session_and_headers()
+            found_uid = find_block_uid(session, headers, GRAPH_NAME, content)
+            
+            if found_uid:
+                logger.debug(f"Created block with UID: {found_uid}")
+                return found_uid
+            
+            # If we couldn't find the UID by content, return the one we generated
+            logger.debug(f"Block created but couldn't verify, returning generated UID: {block_uid}")
+            return block_uid
+        else:
+            logger.error(f"Failed to create block: {result.get('error', 'Unknown error')}")
+            return None
     except Exception as e:
         if isinstance(e, (BlockNotFoundError, ValidationError, TransactionError)):
             raise
@@ -785,10 +850,10 @@ def batch_update_blocks(updates: List[Dict[str, Any]], chunk_size: int = 50) -> 
                         "content": new_content
                     })
                 except re.error as e:
-                    results.append({
-                        "success": False,
-                        "block_uid": block_uid,
-                        "error": f"Invalid regex pattern: {str(e)}"
+                                    results.append({
+                                        "success": False,
+                                        "block_uid": block_uid,
+                                        "error": f"Invalid regex pattern: {str(e)}"
                     })
                 except KeyError as e:
                     results.append({

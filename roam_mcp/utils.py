@@ -5,6 +5,8 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set, Match, Tuple, Union
 import json
+import time
+import uuid
 
 # Set up logging
 logger = logging.getLogger("roam-mcp.utils")
@@ -482,11 +484,14 @@ def create_block_action(parent_uid: str, content: str, order: Union[int, str] = 
     
     if uid:
         block_data["uid"] = uid
+    else:
+        # Generate a unique UID if none provided
+        block_data["uid"] = str(uuid.uuid4())[:9]
         
     if heading and heading > 0 and heading <= 3:
         block_data["heading"] = heading
     
-    return {
+    action = {
         "action": "create-block",
         "location": {
             "parent-uid": parent_uid,
@@ -494,6 +499,9 @@ def create_block_action(parent_uid: str, content: str, order: Union[int, str] = 
         },
         "block": block_data
     }
+    
+    logger.debug(f"Created block action for parent {parent_uid}: {content[:30]}{'...' if len(content) > 30 else ''}")
+    return action
 
 
 def process_nested_content(content: List[Dict], parent_uid: str, session, headers, graph_name: str) -> List[str]:
@@ -512,129 +520,87 @@ def process_nested_content(content: List[Dict], parent_uid: str, session, header
     """
     from roam_mcp.api import execute_batch_actions  # Import here to avoid circular imports
     
-    created_uids = []
-    batch_actions = []
-    
-    # First pass: create actions for all blocks in the hierarchy
-    def build_actions(items, parent_uid, index_start=0):
-        action_map = {}  # Maps item index to action index in batch_actions
-        
-        for i, block in enumerate(items, start=index_start):
-            # Extract heading level if present
-            heading_level = block.get("heading_level", 0)
-            
-            action = create_block_action(
-                parent_uid=parent_uid,
-                content=block["text"],
-                order=i,
-                heading=heading_level
-            )
-            
-            batch_actions.append(action)
-            action_map[i] = len(batch_actions) - 1
-            
-            # If the block has children, process them
-            children = block.get("children", [])
-            if children:
-                # Children will be processed after we get UIDs for parents
-                action_map.update(build_actions(children, f"TEMP_PARENT_{i}", len(action_map)))
-                
-        return action_map
-    
-    # Build initial actions
-    action_map = build_actions(content, parent_uid)
-    
-    # If there are no actions, return empty list
-    if not batch_actions:
+    if not content:
         return []
     
-    # Execute actions in batches of 50
-    BATCH_SIZE = 50
-    for i in range(0, len(batch_actions), BATCH_SIZE):
-        chunk = batch_actions[i:i + BATCH_SIZE]
+    # Sort content by level
+    content = sorted(content, key=lambda x: x.get("level", 0))
+    
+    # Create batch actions
+    batch_actions = []
+    level_parent_map = {0: parent_uid}
+    
+    # Process items level by level (top-down)
+    for item in content:
+        level = item.get("level", 0)
+        text = item.get("text", "")
+        heading_level = item.get("heading_level", 0)
         
-        # Execute batch
-        response = session.post(
-            f'https://api.roamresearch.com/api/graph/{graph_name}/write',
-            headers=headers,
-            json={"action": "batch-actions", "actions": chunk}
+        # Find parent for this level
+        parent_level = level - 1
+        if parent_level < 0:
+            parent_level = 0
+            
+        parent_for_item = level_parent_map.get(parent_level, parent_uid)
+        
+        # Create block action
+        action = create_block_action(
+            parent_uid=parent_for_item,
+            content=text,
+            order="last",
+            heading=heading_level
         )
         
-        if response.status_code != 200:
-            logger.error(f"Failed to create batch: {response.text}")
-            raise Exception(f"Failed to create blocks: {response.text}")
+        batch_actions.append(action)
         
-        # Get UIDs of created blocks
-        result = response.json()
-        if "created_uids" in result:
-            created_uids.extend(result["created_uids"])
+        # Add temp ID for this level for child reference
+        level_parent_map[level] = f"temp_{len(batch_actions)-1}"
     
-    return created_uids
+    # Execute the batch
+    result = execute_batch_actions(batch_actions)
+    return result.get("created_uids", [])
 
 
-def find_block_uid(session, headers, graph_name: str, block_content: str) -> str:
+def find_block_uid(session, headers, graph_name: str, block_content: str, max_retries: int = 3) -> Optional[str]:
     """
-    Search for a block by its content to find its UID.
+    Search for a block by its content to find its UID with retries.
     
     Args:
         session: Active session for API requests
         headers: Request headers with authentication
         graph_name: Roam graph name
         block_content: Content to search for
+        max_retries: Maximum number of retries
         
     Returns:
-        Block UID
+        Block UID or None if not found
     """
     # Escape quotes in content
     escaped_content = block_content.replace('"', '\\"')
     
-    search_query = f'''[:find (pull ?e [:block/uid])
-                      :where [?e :block/string "{escaped_content}"]]'''
-    
-    search_response = session.post(
-        f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-        headers=headers,
-        json={"query": search_query}
-    )
-    
-    if search_response.status_code == 200 and search_response.json().get('result'):
-        try:
-            block_uid = search_response.json()['result'][0][0][':block/uid']
+    for attempt in range(max_retries):
+        search_query = f'''[:find ?uid .
+                          :where [?e :block/string "{escaped_content}"]
+                                 [?e :block/uid ?uid]]'''
+        
+        response = session.post(
+            f'https://api.roamresearch.com/api/graph/{graph_name}/q',
+            headers=headers,
+            json={"query": search_query}
+        )
+        
+        if response.status_code == 200 and response.json().get('result'):
+            block_uid = response.json()['result']
             return block_uid
-        except (KeyError, IndexError):
-            logger.error("Unexpected response format when finding block UID")
-            raise Exception("Failed to find the block UID due to unexpected response format")
-    else:
-        # Try a more relaxed search if we can't find an exact match
-        # This can happen if there are subtle whitespace or formatting differences
-        logger.debug(f"Exact block match not found, trying a more relaxed search")
-        try:
-            # Get a list of recent blocks sorted by creation time
-            time_query = f'''[:find ?uid ?string ?time
-                             :where [?b :block/string ?string]
-                                    [?b :block/uid ?uid]
-                                    [?b :create/time ?time]]
-                             :order :desc
-                             :limit 5'''
             
-            time_response = session.post(
-                f'https://api.roamresearch.com/api/graph/{graph_name}/q',
-                headers=headers,
-                json={"query": time_query}
-            )
-            
-            if time_response.status_code == 200 and time_response.json().get('result'):
-                # Check if any of these recent blocks match our content
-                clean_content = block_content.strip()
-                for uid, content, time in time_response.json()['result']:
-                    if content.strip() == clean_content:
-                        return uid
-            
-            logger.error("Could not find block UID with relaxed search")
-            raise Exception("Failed to find the block UID even with relaxed search")
-        except Exception as e:
-            logger.error(f"Error in relaxed block search: {str(e)}")
-            raise Exception(f"Failed to find the block UID: {str(e)}")
+        # If not found and not the last attempt, wait and retry
+        if attempt < max_retries - 1:
+            wait_time = 1 * (attempt + 1)  # Exponential backoff
+            logger.debug(f"Block not found, retrying in {wait_time}s (attempt {attempt+1}/{max_retries})")
+            time.sleep(wait_time)
+    
+    logger.debug(f"Could not find block UID for content: {block_content[:50]}...")
+    return None
 
 
 def find_page_by_title(session, headers, graph_name: str, title: str) -> Optional[str]:
@@ -683,7 +649,7 @@ def find_page_by_title(session, headers, graph_name: str, title: str) -> Optiona
         if uid_response.status_code == 200 and uid_response.json().get('result'):
             return title
     
-    # If still not found, try case-insensitive match by getting all pages
+# If still not found, try case-insensitive match by getting all pages
     all_pages_query = f'''[:find ?title ?uid
                          :where [?e :node/title ?title]
                                  [?e :block/uid ?uid]]'''
