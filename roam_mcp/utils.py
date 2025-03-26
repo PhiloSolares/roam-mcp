@@ -430,6 +430,37 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
+def detect_url_type(url: str) -> str:
+    """
+    Detect the type of content a URL points to.
+    
+    Args:
+        url: URL to analyze
+        
+    Returns:
+        Content type: 'youtube', 'pdf', 'webpage', or 'unknown'
+    """
+    url_lower = url.lower()
+    
+    # Check for YouTube
+    youtube_patterns = [
+        r"(?:youtube\.com\/watch\?v=|youtu\.be\/)",
+        r"youtube\.com\/embed\/",
+        r"youtube\.com\/v\/",
+        r"youtube\.com\/user\/[^\/]+\/\?v="
+    ]
+    for pattern in youtube_patterns:
+        if re.search(pattern, url_lower):
+            return "youtube"
+    
+    # Check for PDF
+    if url_lower.endswith('.pdf') or '/pdf/' in url_lower:
+        return "pdf"
+    
+    # Default to webpage
+    return "webpage"
+
+
 def create_block_action(parent_uid: str, content: str, order: Union[int, str] = "last", 
                         uid: Optional[str] = None, heading: Optional[int] = None) -> Dict[str, Any]:
     """
