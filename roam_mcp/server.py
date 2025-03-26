@@ -47,10 +47,8 @@ from roam_mcp.memory import (
     recall
 )
 from roam_mcp.utils import (
-    extract_youtube_video_id,
-    detect_url_type
+    extract_youtube_video_id
 )
-from roam_mcp.content_parsers import parse_webpage, parse_pdf
 
 # Initialize FastMCP server
 mcp = FastMCP("roam-research")
@@ -781,78 +779,6 @@ async def get_youtube_transcript(url: str) -> str:
     except Exception as e:
         logger.error(f"Error fetching YouTube transcript: {str(e)}", exc_info=True)
         return f"An error occurred while fetching the transcript: {str(e)}"
-
-
-@mcp.tool()
-async def fetch_webpage_content(url: str) -> str:
-    """Fetch and extract the main content from a web page.
-
-    Args:
-        url: URL of the web page to fetch
-    """
-    if not validate_environment():
-        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
-    
-    try:
-        logger.debug(f"Fetching webpage content: {url}")
-        result = await parse_webpage(url)
-        
-        if result["success"]:
-            return f"# {result['title']}\n\nSource: {url}\n\n{result['content']}"
-        else:
-            return f"Error fetching webpage: {result.get('error', 'Unknown error')}"
-    except Exception as e:
-        logger.error(f"Error in fetch_webpage_content: {str(e)}", exc_info=True)
-        return f"Error fetching webpage: {str(e)}"
-
-
-@mcp.tool()
-async def fetch_pdf_content(url: str) -> str:
-    """Fetch and extract the content from a PDF file.
-
-    Args:
-        url: URL of the PDF file to fetch
-    """
-    if not validate_environment():
-        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
-    
-    try:
-        logger.debug(f"Fetching PDF content: {url}")
-        result = await parse_pdf(url)
-        
-        if result["success"]:
-            return f"# {result['title']}\n\nSource: {url}\n\n{result['content']}"
-        else:
-            return f"Error fetching PDF: {result.get('error', 'Unknown error')}"
-    except Exception as e:
-        logger.error(f"Error in fetch_pdf_content: {str(e)}", exc_info=True)
-        return f"Error fetching PDF: {str(e)}"
-
-
-@mcp.tool()
-async def parse_url(url: str) -> str:
-    """Intelligently parse content from a URL - supports webpages, PDFs, and YouTube videos.
-
-    Args:
-        url: URL to parse
-    """
-    if not validate_environment():
-        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
-    
-    try:
-        # Detect URL type
-        url_type = detect_url_type(url)
-        
-        if url_type == "youtube":
-            # Use existing YouTube transcript function
-            return await get_youtube_transcript(url)
-        elif url_type == "pdf":
-            return await fetch_pdf_content(url)
-        else:  # webpage or unknown
-            return await fetch_webpage_content(url)
-    except Exception as e:
-        logger.error(f"Error parsing URL: {str(e)}", exc_info=True)
-        return f"Error parsing URL: {str(e)}"
 
 
 @mcp.tool()
