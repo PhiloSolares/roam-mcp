@@ -2,7 +2,10 @@
 
 import argparse
 import sys
-from roam_mcp.server import run_server
+import logging # Import logging to potentially catch early errors
+
+# Import the runner function and validation from server module
+from roam_mcp.server import run_server, validate_environment_and_log, setup_logging
 
 def main():
     """Entry point for the Roam MCP server CLI."""
@@ -13,7 +16,7 @@ def main():
         "--transport",
         choices=["stdio", "sse"],
         default="stdio",
-        help="Transport method (stdio or sse)"
+        help="Transport method (stdio or sse, default: stdio)"
     )
     
     # Server configuration
@@ -28,24 +31,41 @@ def main():
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
-        help="Enable verbose logging"
+        help="Enable verbose DEBUG logging (default: INFO)"
     )
 
     # Parse arguments
     args = parser.parse_args()
 
-    # Run the server with the specified transport
+    # Setup logging early based on verbosity arg
+    # Note: run_server also calls setup_logging, but doing it here
+    # allows catching potential issues during arg parsing or early setup.
+    setup_logging(verbose=args.verbose)
+    logger = logging.getLogger("roam-mcp.cli") # Get logger for CLI scope
+
+    # Validate environment before running server - optional but good practice
+    # run_server already does this, but checking early can provide faster feedback
+    # if validate_environment_and_log():
+    #     logger.info("Environment validation successful.")
+    # else:
+    #     # Validation function prints detailed instructions
+    #     logger.error("Environment validation failed. Server might not function correctly.")
+    #     # Decide whether to exit or continue
+    #     # sys.exit(1) # Optional: Exit if validation fails
+
+    # Run the server (which will re-validate and log)
     try:
         run_server(
             transport=args.transport,
             port=args.port if args.transport == "sse" else None,
-            verbose=args.verbose
+            verbose=args.verbose # Pass verbosity to server runner
         )
     except KeyboardInterrupt:
-        print("\nServer stopped by user", file=sys.stderr)
-        sys.exit(0)
+        # run_server handles its own logging for this
+        pass # Already handled in run_server
     except Exception as e:
-        print(f"Error starting server: {str(e)}", file=sys.stderr)
+        # Catch any exceptions bubbling up from run_server start
+        logger.critical(f"Failed to start or run server: {str(e)}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":
