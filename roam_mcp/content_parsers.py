@@ -94,15 +94,26 @@ async def parse_pdf(url: str) -> Dict[str, Any]:
                 temp_file.write(response.content)
         
         # Extract content using unstructured
-        elements = partition_pdf(
-            temp_path,
-            strategy="hi_res",
-            extract_images=False,
-            extract_tables=True
-        )
-        
-        # Convert to formatted text while preserving structure
-        content = "\n\n".join([str(element) for element in elements])
+        try:
+            elements = partition_pdf(
+                temp_path,
+                strategy="hi_res",
+                extract_images=False,
+                extract_tables=True
+            )
+            
+            # Convert to formatted text while preserving structure
+            content = "\n\n".join([str(element) for element in elements])
+        except UnicodeDecodeError:
+            # Fall back to a simpler strategy if hi_res fails with encoding issues
+            logger.warning(f"Encountered encoding issues with hi_res strategy, trying fast strategy")
+            elements = partition_pdf(
+                temp_path,
+                strategy="fast",
+                extract_images=False,
+                extract_tables=False
+            )
+            content = "\n\n".join([str(element) for element in elements])
         
         # Try to extract a title from the filename in the URL
         path_parts = url.split('/')
