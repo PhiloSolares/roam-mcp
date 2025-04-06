@@ -1,0 +1,92 @@
+# OS-specific
+.DS_Store
+
+# Python bytecode and C extensions
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Build system artifacts
+.Python
+build/
+dist/
+downloads/
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+wheels/
+share/python-wheels/
+sdist/
+develop-eggs/
+lib/
+lib64/
+parts/
+var/
+.installed.cfg
+
+# Packaging tools
+*.spec
+
+# Logs and runtime files
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Coverage and test artifacts
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.pytest_cache/
+.hypothesis/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and editors
+.vscode/
+.idea/
+.spyderproject
+.spyproject
+.ropeproject
+
+# Jupyter and IPython
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# Documentation
+docs/_build/
+site/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+
+# Other project tools
+.pybuilder/
+target/
+scrapy/
+.webassets-cache
+celerybeat-schedule
+celerybeat.pid
+
+# SQLite (dev DBs)
+db.sqlite3
+db.sqlite3-journal
