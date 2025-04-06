@@ -6,6 +6,7 @@ import re
 import logging
 import uuid
 import time
+import json
 
 from roam_mcp.api import (
     execute_query,
@@ -64,8 +65,10 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
         if content:
             # Validate content structure
             def validate_item(item, parent_level=0):
-                if not isinstance(item.get("text"), str):
-                    return "Each item must have 'text' as a string"
+                # Accept either "text" or "string" field
+                text_content = item.get("text", item.get("string", None))
+                if not isinstance(text_content, str):
+                    return "Each item must have 'text' or 'string' as a string"
                 level = item.get("level", parent_level + 1)
                 if not isinstance(level, int):
                     return "'level' must be an integer"
@@ -84,7 +87,12 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
             for item in content:
                 error = validate_item(item, -1)  # Root level starts at -1 (page is 0)
                 if error:
-                    return {"success": False, "error": f"Invalid content structure - {error}"}
+                    example_structure = [
+                        {"text": "Heading", "level": 0},
+                        {"text": "Bullet point", "level": 1}
+                    ]
+                    error_message = f"Invalid content structure - {error}. Each item must have a 'text' field. Example: {json.dumps(example_structure, indent=2)}"
+                    return {"success": False, "error": error_message}
             
             # Process content in levels
             created_uids = []
@@ -94,7 +102,8 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
             
             def flatten_content(items, parent_level=-1):
                 for item in items:
-                    text = item.get("text", "")
+                    # Accept either "text" or "string" field
+                    text = item.get("text", item.get("string", ""))
                     level = item.get("level", parent_level + 1)
                     heading_level = item.get("heading_level", 0)
                     

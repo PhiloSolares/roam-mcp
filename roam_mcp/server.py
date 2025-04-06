@@ -211,7 +211,16 @@ async def roam_create_page(title: str, content: Optional[List[Dict[str, Any]]] =
 
     Args:
         title: Title of the new page
-        content: Initial content for the page as an array of blocks with explicit nesting levels
+        content: Initial content for the page as an array of blocks with explicit nesting levels.
+               Each block must have a 'text' field with the content as a string.
+               Example:
+               [
+                 {"text": "Heading", "level": 0},
+                 {"text": "- Bullet point", "level": 1},
+                 {"text": "- Another point", "level": 1, "children": [
+                   {"text": "- Nested point", "level": 2}
+                 ]}
+               ]
     """
     if not validate_environment():
         return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
