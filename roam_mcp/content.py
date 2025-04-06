@@ -109,6 +109,10 @@ def process_hierarchical_content(parent_uid: str, content_data: List[Dict[str, A
         
         # Get item properties
         text = item.get("text", item.get("string", ""))
+        
+        # Strip leading dash characters that might cause double bullets
+        text = re.sub(r'^-\s+', '', text)
+        
         level = item.get("level", current_level)
         heading_level = item.get("heading_level", 0)
         

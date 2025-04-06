@@ -216,9 +216,9 @@ async def roam_create_page(title: str, content: Optional[List[Dict[str, Any]]] =
                Example:
                [
                  {"text": "Heading", "level": 0},
-                 {"text": "- Bullet point", "level": 1},
-                 {"text": "- Another point", "level": 1, "children": [
-                   {"text": "- Nested point", "level": 2}
+                 {"text": "Bullet point", "level": 1},
+                 {"text": "Another point", "level": 1, "children": [
+                   {"text": "Nested point", "level": 2}
                  ]}
                ]
     """
