@@ -291,7 +291,7 @@ def parse_markdown_list(markdown: str) -> List[Dict[str, Any]]:
             node = MarkdownNode(content, level)
             
             # Find the right parent for this node
-            while node_stack[-1].level >= level:
+            while len(node_stack) > 1 and node_stack[-1].level >= level:
                 node_stack.pop()
                 
             # Add to parent
@@ -341,7 +341,7 @@ def parse_markdown_list(markdown: str) -> List[Dict[str, Any]]:
                 level_to_append = level
             
             # Pop stack until we find parent level
-            while node_stack[-1].level >= level:
+            while len(node_stack) > 1 and node_stack[-1].level >= level:
                 node_stack.pop()
                 
             # Create new node
@@ -352,7 +352,7 @@ def parse_markdown_list(markdown: str) -> List[Dict[str, Any]]:
         else:
             # Non-list line - treat as continuation of previous item or as top-level text
             content = line.strip()
-            if content and current_level >= 0:
+            if content and current_level >= 0 and len(node_stack) > 1:
                 # Add to the current node's content
                 node_stack[-1].content += "\n" + content
             elif content:
@@ -362,27 +362,70 @@ def parse_markdown_list(markdown: str) -> List[Dict[str, Any]]:
                 node_stack = [root, node]
                 current_level = 0
     
-    # Convert the tree to the expected dictionary format
-    result = []
-    for node in root.children:
-        def process_node(node, result_list):
-            node_dict = node.to_dict()
+    # Convert the tree to the expected dictionary format with proper hierarchy
+    def build_hierarchy(node):
+        """Convert a node and its children to a hierarchical dictionary structure."""
+        result = {
+            "text": node.content,
+            "level": node.level
+        }
+        
+        if node.heading_level:
+            result["heading_level"] = node.heading_level
             
-            # Handle children recursively
-            children = node_dict.pop("children", [])
-            result_list.append(node_dict)
+        if node.children:
+            result["children"] = [build_hierarchy(child) for child in node.children]
             
-            # Process children
-            for child in children:
-                process_node(MarkdownNode(
-                    child["text"], 
-                    child.get("level", 0),
-                    child.get("heading_level", 0)
-                ), result_list)
-            
-        process_node(node, result)
+        return result
     
-    return result
+    # Build result with correct hierarchy
+    hierarchical_result = []
+    for child in root.children:
+        hierarchical_result.append(build_hierarchy(child))
+    
+    # We'll now convert this to the flattened format for backward compatibility
+    # while preserving hierarchy information for functions that can use it
+    flattened_result = []
+    
+    def flatten_hierarchy(item, parent_level=-1, path=None):
+        """Flatten a hierarchical structure while preserving parent-child information."""
+        if path is None:
+            path = []
+        
+        # Get item properties
+        text = item["text"]
+        level = item.get("level", parent_level + 1)
+        heading_level = item.get("heading_level", 0)
+        
+        # Create the flattened item
+        flat_item = {
+            "text": text,
+            "level": level
+        }
+        
+        if heading_level:
+            flat_item["heading_level"] = heading_level
+            
+        # Add path information for reconstructing hierarchy
+        flat_item["_path"] = path.copy()
+        
+        # Add to results
+        flattened_result.append(flat_item)
+        
+        # Process children
+        children = item.get("children", [])
+        if children:
+            for i, child in enumerate(children):
+                child_path = path + [i]
+                flatten_hierarchy(child, level, child_path)
+    
+    # Flatten the hierarchical result
+    for i, item in enumerate(hierarchical_result):
+        flatten_hierarchy(item, -1, [i])
+    
+    # We return the flattened result but with _path information
+    # for reconstructing hierarchy if needed
+    return flattened_result
 
 
 def convert_roam_dates(text: str) -> str:

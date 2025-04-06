@@ -45,6 +45,11 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
     Args:
         title: Title for the new page
         content: Optional content as a list of dicts with 'text', optional 'level', and optional 'children'
+               Each item should have:
+               - 'text' or 'string': Content text
+               - 'level': Nesting level (optional, defaults to parent_level + 1)
+               - 'heading_level': Heading level 1-3 (optional)
+               - 'children': List of child items (optional)
         
     Returns:
         Result with page UID and created block UIDs
@@ -63,165 +68,37 @@ def create_page(title: str, content: Optional[List[Dict[str, Any]]] = None) -> D
         
         # Add content if provided
         if content:
-            # Validate content structure
-            def validate_item(item, parent_level=0):
-                # Accept either "text" or "string" field
-                text_content = item.get("text", item.get("string", None))
-                if not isinstance(text_content, str):
-                    return "Each item must have 'text' or 'string' as a string"
-                level = item.get("level", parent_level + 1)
-                if not isinstance(level, int):
-                    return "'level' must be an integer"
-                if level < 0:
-                    return "'level' must be non-negative"
-                # Don't enforce strict level validation as the debug script shows this works
-                children = item.get("children", [])
-                if not isinstance(children, list):
-                    return "'children' must be a list"
-                for child in children:
-                    error = validate_item(child, level)
-                    if error:
-                        return error
-                return None
+            # Use the standardized hierarchical content processor
+            result = process_hierarchical_content(page_uid, content)
             
-            for item in content:
-                error = validate_item(item, -1)  # Root level starts at -1 (page is 0)
-                if error:
-                    example_structure = [
-                        {"text": "Heading", "level": 0},
-                        {"text": "Bullet point", "level": 1}
-                    ]
-                    error_message = f"Invalid content structure - {error}. Each item must have a 'text' field. Example: {json.dumps(example_structure, indent=2)}"
-                    return {"success": False, "error": error_message}
-            
-            # Process content in levels
-            created_uids = []
-            
-            # Flatten the hierarchical content structure
-            flattened_content = []
-            
-            def flatten_content(items, parent_level=-1):
-                for item in items:
-                    # Accept either "text" or "string" field
-                    text = item.get("text", item.get("string", ""))
-                    level = item.get("level", parent_level + 1)
-                    heading_level = item.get("heading_level", 0)
-                    
-                    flattened_content.append({
-                        "text": text,
-                        "level": level,
-                        "heading_level": heading_level
-                    })
-                    
-                    children = item.get("children", [])
-                    if children:
-                        flatten_content(children, level)
-            
-            flatten_content(content)
-            
-            # Sort by level
-            flattened_content.sort(key=lambda x: x.get("level", 0))
-            
-            # Group by level
-            level_items = {}
-            for item in flattened_content:
-                level = item.get("level", 0)
-                if level not in level_items:
-                    level_items[level] = []
-                level_items[level].append(item)
-            
-            # Process level by level
-            level_parent_map = {-1: page_uid}
-            
-            for level in sorted(level_items.keys()):
-                batch_actions = []
-                level_uids = []
-                
-                for item in level_items[level]:
-                    text = item.get("text", "")
-                    heading_level = item.get("heading_level", 0)
-                    
-                    # Find parent from previous level
-                    parent_level = level - 1
-                    if parent_level < -1:
-                        parent_level = -1
-                        
-                    parent_uid = level_parent_map.get(parent_level, page_uid)
-                    
-                    # Generate UID
-                    block_uid = str(uuid.uuid4())[:9]
-                    level_uids.append(block_uid)
-                    
-                    # Create action
-                    action = {
-                        "action": "create-block",
-                        "location": {
-                            "parent-uid": parent_uid,
-                            "order": "last"
-                        },
-                        "block": {
-                            "string": text,
-                            "uid": block_uid
-                        }
-                    }
-                    
-                    if heading_level and heading_level > 0 and heading_level <= 3:
-                        action["block"]["heading"] = heading_level
-                        
-                    batch_actions.append(action)
-                
-                # Execute batch for this level
-                if batch_actions:
-                    result = execute_write_action(batch_actions)
-                    
-                    if "created_uids" in result:
-                        created_uids.extend(result.get("created_uids", []))
-                    elif result.get("success", False):
-                        # If no UIDs returned but success, use our generated UIDs
-                        created_uids.extend(level_uids)
-                        
-                    # Store last UID at this level as parent for next level
-                    if level_uids:
-                        level_parent_map[level] = level_uids[-1]
-                        
-                    # Add delay between levels
-                    time.sleep(0.5)
-            
-            return {
-                "success": True,
-                "uid": page_uid,
-                "created_uids": created_uids,
-                "page_url": f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
-            }
+            if result["success"]:
+                return {
+                    "success": True,
+                    "uid": page_uid,
+                    "created_uids": result.get("created_uids", []),
+                    "page_url": f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.get("error", "Failed to create content"),
+                    "uid": page_uid,
+                    "page_url": f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
+                }
+        logger.error(f"Error creating page: {str(e)}")
         
         return {
-            "success": True,
+            "error": f"Error creating page: {str(e)}"
             "uid": page_uid,
             "page_url": f"https://roamresearch.com/#/app/{GRAPH_NAME}/page/{page_uid}"
         }
-    except ValidationError as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    except TransactionError as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-
-def create_block(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None) -> Dict[str, Any]:
+    def create_block(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a new block in Roam Research.
     
     Args:
-        content: Block content
+        content: Block content - can be single-line text or multi-line content
+                 that will be parsed into a hierarchical structure
         page_uid: Optional page UID
         page_title: Optional page title
         
@@ -263,82 +140,94 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
                     "error": "Failed to parse content"
                 }
             
-            # Process nested content with top-down approach
-            created_uids = []
-            level_parent_map = {-1: target_page_uid}
-            
-            # Group by level
-            level_items = {}
-            for item in parsed_content:
-                level = item.get("level", 0)
-                if level not in level_items:
-                    level_items[level] = []
-                level_items[level].append(item)
-            
-            # Process level by level
-            for level in sorted(level_items.keys()):
-                actions = []
-                level_uids = []
+            # Build hierarchical structure
+            def build_hierarchy_from_parsed(items):
+                # Sort by level first
+                sorted_items = sorted(items, key=lambda x: x.get("level", 0))
                 
-                for item in level_items[level]:
-                    text = item.get("text", "")
-                    heading_level = item.get("heading_level", 0)
-                    
-                    # Find parent for this level
-                    parent_level = level - 1
-                    if parent_level < -1:
-                        parent_level = -1
-                        
-                    parent_uid = level_parent_map.get(parent_level, target_page_uid)
-                    
-                    # Generate UID
-                    block_uid = str(uuid.uuid4())[:9]
-                    level_uids.append(block_uid)
-                    
-                    # Create action
-                    action = {
-                        "action": "create-block",
-                        "location": {
-                            "parent-uid": parent_uid,
-                            "order": "last"
-                        },
-                        "block": {
-                            "string": text,
-                            "uid": block_uid
-                        }
-                    }
-                    
-                    if heading_level and heading_level > 0 and heading_level <= 3:
-                        action["block"]["heading"] = heading_level
-                        
-                    actions.append(action)
+                # Group items by level
+                level_groups = {}
+                for item in sorted_items:
+                    level = item.get("level", 0)
+                    if level not in level_groups:
+                        level_groups[level] = []
+                    level_groups[level].append(item)
                 
-                # Execute batch for this level
-                if actions:
-                    result = execute_write_action(actions)
-                    
-                    if "created_uids" in result:
-                        created_uids.extend(result.get("created_uids", []))
-                    elif result.get("success", False):
-                        # If no UIDs returned but success, use our generated UIDs
-                        created_uids.extend(level_uids)
-                        
-                    # Store the last UID at this level as parent for next level
-                    if level_uids:
-                        level_parent_map[level] = level_uids[-1]
-                        
-                    # Add delay between levels
-                    time.sleep(0.5)
+                # Find the minimum level (root level)
+                min_level = min(level_groups.keys()) if level_groups else 0
+                root_items = level_groups.get(min_level, [])
+                
+                # Track parents at each level
+                current_parents = {}
+                hierarchical_items = []
+                
+                # Process items level by level
+                for level in sorted(level_groups.keys()):
+                    for item in level_groups[level]:
+                        if level == min_level:
+                            # Root level items
+                            hierarchical_items.append(item)
+                            current_parents[level] = item
+                        else:
+                            # Find the parent
+                            parent_level = level - 1
+                            while parent_level >= min_level:
+                                if parent_level in current_parents:
+                                    parent = current_parents[parent_level]
+                                    if "children" not in parent:
+                                        parent["children"] = []
+                                    parent["children"].append(item)
+                                    current_parents[level] = item
+                                    break
+                                parent_level -= 1
+                            
+                            # If no parent found, add as root
+                            if parent_level < min_level:
+                                hierarchical_items.append(item)
+                                current_parents[level] = item
+                
+                return hierarchical_items
             
-            return {
-                "success": True,
-                "block_uid": created_uids[0] if created_uids else None,
-                "parent_uid": target_page_uid,
-                "created_uids": created_uids
-            }
+            # Build hierarchical structure
+            hierarchical_content = build_hierarchy_from_parsed(parsed_content)
+            
+            # Process using the standardized hierarchical content processor
+            result = process_hierarchical_content(target_page_uid, hierarchical_content)
+            
+            if result["success"]:
+                return {
+                    "success": True,
+                    "block_uid": result["created_uids"][0] if result["created_uids"] else None,
+                    "parent_uid": target_page_uid,
+                    "created_uids": result["created_uids"]
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.get("error", "Failed to create hierarchical blocks"),
+                    "parent_uid": target_page_uid
+                }
         else:
             # Create a simple block with explicit UID
             block_uid = str(uuid.uuid4())[:9]
+            "error": str(e)
+        }
+    except BlockNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    except TransactionError as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Error creating block: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Error creating block: {str(e)}"
+        }
             
             action_data = {
                 "action": "create-block",
@@ -355,52 +244,19 @@ def create_block(content: str, page_uid: Optional[str] = None, page_title: Optio
             result = execute_write_action(action_data)
             if result.get("success", False):
                 # Verify the block exists after a brief delay
-                time.sleep(1)
+                time.sleep(0.5)
                 found_uid = find_block_uid(session, headers, GRAPH_NAME, content)
                 
-                return {
-                    "success": True,
-                    "block_uid": found_uid or block_uid,
-                    "parent_uid": target_page_uid
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": "Failed to create block"
-                }
-    except ValidationError as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    except PageNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    except BlockNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    except TransactionError as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-
-def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] = None, block_text_uid: Optional[str] = None) -> Dict[str, Any]:
+            def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] = None, block_text_uid: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a structured outline in Roam Research.
     
     Args:
         outline: List of outline items with text and level
+               Each item should have:
+                - 'text': Content text (required)
+                - 'level': Nesting level (required)
+                - 'heading_level': Heading level 1-3 (optional)
         page_title_uid: Optional page title or UID
         block_text_uid: Optional block text or UID to add outline under
         
@@ -487,79 +343,74 @@ def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] 
                     
                 parent_uid = header_uid
         
-        # Generate batch actions for outline - but create level by level
-        created_uids = []
-        level_items = {}
-        
-        # Group items by level
-        for item in outline:
-            level = item["level"]
-            if level not in level_items:
-                level_items[level] = []
-            level_items[level].append(item)
-        
-        # Process levels in order (0, 1, 2, etc.)
-        current_level_parents = {-1: parent_uid}  # Start with root parent
-        
-        for level in sorted(level_items.keys()):
-            level_batch = []
-            level_uids = []
+        # Build hierarchical structure from flat outline items
+        def build_outline_hierarchy(items):
+            # First, sort by level
+            sorted_items = sorted(items, key=lambda x: x.get("level", 0))
             
-            for item in level_items[level]:
-                # Find parent from previous level
-                parent_level = level - 1
-                if parent_level < 0:
-                    parent_for_item = parent_uid
+            # Group items by level
+            level_groups = {}
+            for item in sorted_items:
+                level = item.get("level", 0)
+                if level not in level_groups:
+                    level_groups[level] = []
+                level_groups[level].append(item)
+            
+            # Build parent-child relationships based on item position and level
+            min_level = min(level_groups.keys()) if level_groups else 0
+            hierarchical_items = []
+            
+            # Track parent nodes at each level
+            level_parents = {}
+            
+            # Process items in order
+            for item in sorted_items:
+                level = item.get("level", 0)
+                
+                # If this is a root-level item, add it to the result directly
+                if level == min_level:
+                    hierarchical_items.append(item)
+                    level_parents[level] = item
                 else:
-                    # Use the last created block at the parent level as parent
-                    parent_index = len(level_items.get(parent_level, [])) - 1
-                    if parent_index >= 0 and parent_level in current_level_parents:
-                        parent_for_item = current_level_parents[parent_level]
+                    # Find the nearest parent level
+                    parent_level = level - 1
+                    while parent_level >= min_level and parent_level not in level_parents:
+                        parent_level -= 1
+                    
+                    # If we found a parent, add this item as its child
+                    if parent_level >= min_level:
+                        parent = level_parents[parent_level]
+                        if "children" not in parent:
+                            parent["children"] = []
+                        parent["children"].append(item)
+                        level_parents[level] = item
                     else:
-                        parent_for_item = parent_uid
-                
-                # Generate a unique UID
-                block_uid = str(uuid.uuid4())[:9]
-                level_uids.append(block_uid)
-                
-                # Create block action
-                action = {
-                    "action": "create-block",
-                    "location": {
-                        "parent-uid": parent_for_item,
-                        "order": "last"
-                    },
-                    "block": {
-                        "string": item["text"],
-                        "uid": block_uid
-                    }
-                }
-                
-                level_batch.append(action)
+                        # If no parent found, add it as a root item
+                        hierarchical_items.append(item)
+                        level_parents[level] = item
             
-            # Execute batch for this level
-            if level_batch:
-                result = execute_write_action(level_batch)
-                
-                if "created_uids" in result:
-                    created_uids.extend(result.get("created_uids", []))
-                elif result.get("success", False):
-                    # If no UIDs returned but success, use our generated UIDs
-                    created_uids.extend(level_uids)
-                
-                # Store the last created UID at this level as parent for next level
-                if level_uids:
-                    current_level_parents[level] = level_uids[-1]
-            
-                # Add a small delay between levels
-                time.sleep(0.5)
+            return hierarchical_items
         
-        return {
-            "success": True,
-            "page_uid": target_page_uid,
-            "parent_uid": parent_uid,
-            "created_uids": created_uids
-        }
+        # Build hierarchical structure from outline
+        hierarchical_outline = build_outline_hierarchy(outline)
+        
+        # Use the standardized hierarchical content processor
+        result = process_hierarchical_content(parent_uid, hierarchical_outline)
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "page_uid": target_page_uid,
+                "parent_uid": parent_uid,
+                "created_uids": result.get("created_uids", [])
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.get("error", "Failed to create outline"),
+                "page_uid": target_page_uid,
+                "parent_uid": parent_uid
+            }
     except ValidationError as e:
         return {
             "success": False,
@@ -581,12 +432,16 @@ def create_outline(outline: List[Dict[str, Any]], page_title_uid: Optional[str] 
             "error": str(e)
         }
     except Exception as e:
+        logger.error(f"Error creating outline: {str(e)}")
         return {
             "success": False,
-            "error": str(e)
+            "error": f"Error creating outline: {str(e)}"
         }
-
-
+                if level_uids:
+                    current_level_parents[level] = level_uids[-1]
+            
+                # Add a small delay between levels
+                time.sleep(0.5)
 def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Optional[str] = None,
                    parent_uid: Optional[str] = None, parent_string: Optional[str] = None,
                    order: str = "last") -> Dict[str, Any]:
@@ -694,75 +549,103 @@ def import_markdown(content: str, page_uid: Optional[str] = None, page_title: Op
                 "error": "Failed to parse markdown content"
             }
         
-        # Process items level by level
-        created_uids = []
-        
-        # Sort by level
-        parsed_content.sort(key=lambda x: x.get("level", 0))
-        
-        # Group items by level
-        level_items = {}
-        for item in parsed_content:
-            level = item.get("level", 0)
-            if level not in level_items:
-                level_items[level] = []
-            level_items[level].append(item)
-        
-        # Create batch actions level by level
-        level_parent_map = {-1: parent_block_uid}
-        
-        for level in sorted(level_items.keys()):
-            actions = []
-            level_uids = []
+        # Build a proper hierarchical structure from the parsed markdown
+        def build_hierarchy(items):
+            # Group items by level
+            level_groups = {}
+            for item in items:
+                level = item.get("level", 0)
+                if level not in level_groups:
+                    level_groups[level] = []
+                level_groups[level].append(item)
             
-            for item in level_items[level]:
-                content = item.get("text", "")
-                heading_level = item.get("heading_level", 0)
-                
-                # Find parent for this level
-                parent_level = level - 1
-                if parent_level < -1:
-                    parent_level = -1
+            # Start with the root level (usually 0)
+            min_level = min(level_groups.keys()) if level_groups else 0
+            root_items = level_groups.get(min_level, [])
+            
+            # Recursive function to build the tree
+            def attach_children(parent_items, parent_level):
+                for parent in parent_items:
+                    children = []
+                    child_level = parent_level + 1
                     
-                parent_for_item = level_parent_map.get(parent_level, parent_block_uid)
-                
-                # Generate unique UID
-                block_uid = str(uuid.uuid4())[:9]
-                level_uids.append(block_uid)
-                
-# Create action
-                action = {
-                    "action": "create-block",
-                    "location": {
-                        "parent-uid": parent_for_item,
-                        "order": order if level == 0 else "last"
-                    },
-                    "block": {
-                        "string": content,
-                        "uid": block_uid
-                    }
-                }
-                
-                if heading_level and heading_level > 0 and heading_level <= 3:
-                    action["block"]["heading"] = heading_level
-                
-                actions.append(action)
-                
-                # Store temporary parent mapping for the next level
-                if level in level_parent_map:
-                    level_parent_map[level] = block_uid
+                    # If there are items at the next level
+                    if child_level in level_groups:
+                        # Find children whose current parent would be this item
+                        # based on the flattened list's position
+                        parent_index = items.index(parent)
+                        for potential_child in level_groups[child_level]:
+                            child_index = items.index(potential_child)
+                            
+                            # Is this child positioned after the parent and before the next parent?
+                            if child_index > parent_index:
+                                # Check if there's another parent of the same level between this parent and the child
+                                next_parent_index = float('inf')
+                                for next_parent in level_groups[parent_level]:
+                                    next_idx = items.index(next_parent)
+                                    if next_idx > parent_index and next_idx < child_index:
+                                        next_parent_index = next_idx
+                                        break
+                                
+                                if child_index < next_parent_index:
+                                    children.append(potential_child)
+                    
+                    # Set the children
+                    if children:
+                        parent["children"] = children
+                        # Recursively attach children to these children
+                        attach_children(children, child_level)
             
-            # Execute batch for this level
-            if actions:
-                result = execute_write_action(actions)
-                
-                if "created_uids" in result:
-                    created_uids.extend(result.get("created_uids", []))
-                elif result.get("success", False):
-                    # If no UIDs returned but success, use our generated UIDs
-                    created_uids.extend(level_uids)
-                
-                # Add delay between levels
+            # Start the recursive process
+            attach_children(root_items, min_level)
+            return root_items
+        
+        # Build a hierarchical structure that preserves parent-child relationships
+        hierarchical_content = build_hierarchy(parsed_content)
+        
+        # Process the hierarchical content using the standardized utility
+        result = process_hierarchical_content(parent_block_uid, hierarchical_content, order)
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "page_uid": target_page_uid,
+                "parent_uid": parent_block_uid,
+                "created_uids": result.get("created_uids", [])
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.get("error", "Failed to import markdown"),
+                "page_uid": target_page_uid,
+                "parent_uid": parent_block_uid
+            }
+    except ValidationError as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    except PageNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    except BlockNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    except TransactionError as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Error importing markdown: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Error importing markdown: {str(e)}"
+        }
                 time.sleep(0.5)
         
         return {
@@ -1063,6 +946,151 @@ def update_multiple_contents(updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
 
+def process_hierarchical_content(parent_uid: str, content_data: List[Dict[str, Any]], order: str = "last") -> Dict[str, Any]:
+    """
+    Process hierarchical content with proper parent-child relationships.
+    This is a standardized utility function used across different content creation methods.
+    
+    Args:
+        parent_uid: UID of the parent block/page
+        content_data: List of content items with text, level, and optional children/heading_level attributes
+        order: Where to add content ("first" or "last")
+        
+    Returns:
+        Dictionary with success status and created block UIDs
+    """
+    if not content_data:
+        return {
+            "success": True,
+            "created_uids": []
+        }
+    
+    # First, validate the hierarchical structure
+    def validate_item(item, path="root"):
+        errors = []
+        # Check required fields
+        if not item.get("text") and not item.get("string"):
+            errors.append(f"Item at {path} is missing required 'text' field")
+        
+        # Ensure level is valid
+        level = item.get("level")
+        if level is not None and not isinstance(level, int):
+            errors.append(f"Item at {path} has invalid 'level', must be an integer")
+        
+        # Validate heading level
+        heading_level = item.get("heading_level", 0)
+        if heading_level and (not isinstance(heading_level, int) or heading_level < 0 or heading_level > 3):
+            errors.append(f"Item at {path} has invalid 'heading_level', must be an integer between 0 and 3")
+            
+        # Validate children recursively
+        children = item.get("children", [])
+        if not isinstance(children, list):
+            errors.append(f"Item at {path} has invalid 'children', must be a list")
+        else:
+            for i, child in enumerate(children):
+                child_path = f"{path}.children[{i}]"
+                child_errors = validate_item(child, child_path)
+                errors.extend(child_errors)
+                
+        return errors
+    
+    # Validate all items
+    all_errors = []
+    for i, item in enumerate(content_data):
+        item_path = f"item[{i}]"
+        errors = validate_item(item, item_path)
+        all_errors.extend(errors)
+        
+    if all_errors:
+        return {
+            "success": False,
+            "error": f"Invalid content structure: {'; '.join(all_errors)}"
+        }
+    
+    # Process hierarchical content with proper nesting
+    session, headers = get_session_and_headers()
+    all_created_uids = []
+    
+    # Define a recursive function to process items
+    def process_item(item, parent_uid, level_to_uid, current_level):
+        created_uids = []
+        
+        # Get item properties
+        text = item.get("text", item.get("string", ""))
+        level = item.get("level", current_level)
+        heading_level = item.get("heading_level", 0)
+        
+        # Find the appropriate parent for this level
+        parent_level = level - 1
+        if parent_level < -1:
+            parent_level = -1
+            
+        effective_parent = level_to_uid.get(parent_level, parent_uid)
+        
+        # Create block with a unique UID
+        block_uid = str(uuid.uuid4())[:9]
+        
+        action_data = {
+            "action": "create-block",
+            "location": {
+                "parent-uid": effective_parent,
+                "order": order if level == 0 else "last"
+            },
+            "block": {
+                "string": text,
+                "uid": block_uid
+            }
+        }
+        
+        # Add heading level if specified
+        if heading_level and heading_level > 0 and heading_level <= 3:
+            action_data["block"]["heading"] = heading_level
+            
+        # Execute the action
+        result = execute_write_action(action_data)
+        
+        if result.get("success", False):
+            created_uids.append(block_uid)
+            level_to_uid[level] = block_uid
+            logger.debug(f"Created block at level {level} with UID: {block_uid}")
+            
+            # Process children if any
+            children = item.get("children", [])
+            if children:
+                for child in children:
+                    # Process each child with this block as parent
+                    child_result = process_item(child, block_uid, level_to_uid, level + 1)
+                    created_uids.extend(child_result)
+                    
+            # Add a brief delay for API stability
+            time.sleep(0.3)
+        else:
+            logger.error(f"Failed to create block: {result.get('error', 'Unknown error')}")
+        
+        return created_uids
+    
+    try:
+        # Process each top-level item
+        level_to_uid = {-1: parent_uid}  # Start with parent as level -1
+        
+        for item in content_data:
+            item_uids = process_item(item, parent_uid, level_to_uid, 0)
+            all_created_uids.extend(item_uids)
+            
+        return {
+            "success": True,
+            "created_uids": all_created_uids
+        }
+    except Exception as e:
+        error_msg = f"Failed to process hierarchical content: {str(e)}"
+        logger.error(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "created_uids": all_created_uids  # Return any UIDs created before failure
+        }
+
+
 def create_nested_blocks(parent_uid: str, blocks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Create nested blocks with proper parent-child relationships.
@@ -1074,80 +1102,5 @@ def create_nested_blocks(parent_uid: str, blocks_data: List[Dict[str, Any]]) -> 
     Returns:
         Dictionary with success status and created block UIDs
     """
-    if not blocks_data:
-        return {
-            "success": True,
-            "created_uids": []
-        }
-    
-    # Method 1: Create blocks one by one, ensuring proper parent-child relationships
-    session, headers = get_session_and_headers()
-    created_uids = []
-    level_to_uid = {-1: parent_uid}  # Start with parent as level -1
-    
-    try:
-        # Process blocks in order
-        for block in blocks_data:
-            level = block.get("level", 0)
-            content = block.get("text", "")
-            heading_level = block.get("heading_level", 0)
-            
-            # Find parent for this level
-            parent_level = level - 1
-            if parent_level < -1:
-                parent_level = -1
-                
-            parent_for_block = level_to_uid.get(parent_level, parent_uid)
-            
-            # Create block action
-            block_uid = str(uuid.uuid4())[:9]
-            
-            action_data = {
-                "action": "create-block",
-                "location": {
-                    "parent-uid": parent_for_block,
-                    "order": "last"
-                },
-                "block": {
-                    "string": content,
-                    "uid": block_uid
-                }
-            }
-            
-            if heading_level and heading_level > 0 and heading_level <= 3:
-                action_data["block"]["heading"] = heading_level
-                
-            # Execute action
-            result = execute_write_action(action_data)
-            
-            if result.get("success", False):
-                created_uids.append(block_uid)
-                level_to_uid[level] = block_uid
-                logger.debug(f"Created block at level {level} with UID: {block_uid}")
-                
-                # Process children if available
-                children = block.get("children", [])
-                if children:
-                    children_result = create_nested_blocks(block_uid, children)
-                    if children_result.get("success", False):
-                        created_uids.extend(children_result.get("created_uids", []))
-                    else:
-                        logger.warning(f"Failed to create children blocks: {children_result.get('error')}")
-                
-                # Add a brief delay between operations
-                time.sleep(0.5)
-            else:
-                logger.error(f"Failed to create block: {result.get('error', 'Unknown error')}")
-        
-        return {
-            "success": True,
-            "created_uids": created_uids
-        }
-    except Exception as e:
-        error_msg = f"Failed to create nested blocks: {str(e)}"
-        logger.error(error_msg)
-        return {
-            "success": False,
-            "error": error_msg,
-            "created_uids": created_uids  # Return any UIDs created before failure
-        }
+    # For backward compatibility, now uses the standardized hierarchical content processor
+    return process_hierarchical_content(parent_uid, blocks_data)
