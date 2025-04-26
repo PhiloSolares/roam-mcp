@@ -112,6 +112,46 @@ By default, memories are stored with the tag `#[[Memories]]`. To use a different
 }
 ```
 
+## Docker Support
+
+You can run the Roam MCP server in a Docker container:
+
+### Building the Image
+
+```bash
+docker build -t roam-mcp .
+```
+
+### Running the Container
+
+Run with environment variables:
+
+```bash
+docker run -p 3000:3000 \
+  -e ROAM_API_TOKEN="your_api_token" \
+  -e ROAM_GRAPH_NAME="your_graph_name" \
+  roam-mcp
+```
+
+### Using with Claude Desktop
+
+Configure Claude Desktop to use the containerized server:
+
+```json
+{
+  "mcpServers": {
+    "roam-helper": {
+      "command": "docker",
+      "args": ["run", "--rm", "-p", "3000:3000",
+               "-e", "ROAM_API_TOKEN=your_token",
+               "-e", "ROAM_GRAPH_NAME=your_graph",
+               "roam-mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
 ## License
 
 MIT License
