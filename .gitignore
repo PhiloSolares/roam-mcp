@@ -90,3 +90,8 @@ celerybeat.pid
 # SQLite (dev DBs)
 db.sqlite3
 db.sqlite3-journal
+
+# Claude Code and MCP configuration
+.mcp.json
+CLAUDE.md
+WARP.md
