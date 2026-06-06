@@ -970,7 +970,8 @@ def run_server(transport="stdio", port=None, verbose=False):
             if not port:
                 port = 3000
             logger.info(f"Starting server with SSE transport on port {port}")
-            mcp.run(transport="sse", port=port)
+            mcp.settings.port = port
+            mcp.run(transport="sse")
         else:
             logger.error(f"Unsupported transport: {transport}")
             sys.exit(1)
