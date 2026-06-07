@@ -1016,13 +1016,13 @@ def run_server(transport="stdio", host="127.0.0.1", port=None, verbose=False):
         if transport == "stdio":
             logger.info("Starting server with stdio transport")
             mcp.run(transport="stdio")
-        elif transport == "sse":
+        elif transport in ("sse", "streamable-http"):
             if not port:
                 port = 3000
-            logger.info(f"Starting server with SSE transport on {host}:{port}")
+            logger.info(f"Starting server with {transport} transport on {host}:{port}")
             mcp.settings.host = host
             mcp.settings.port = port
-            mcp.run(transport="sse")
+            mcp.run(transport=transport)
         else:
             logger.error(f"Unsupported transport: {transport}")
             sys.exit(1)

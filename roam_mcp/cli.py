@@ -11,9 +11,9 @@ def main():
     # Transport options
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         default="stdio",
-        help="Transport method (stdio or sse)"
+        help="Transport method (stdio, sse, or streamable-http)"
     )
     
     # Server configuration
@@ -45,7 +45,7 @@ def main():
         run_server(
             transport=args.transport,
             host=args.host,
-            port=args.port if args.transport == "sse" else None,
+            port=args.port if args.transport in ("sse", "streamable-http") else None,
             verbose=args.verbose
         )
     except KeyboardInterrupt:
