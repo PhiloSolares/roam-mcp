@@ -937,6 +937,48 @@ def add_todos(todos: List[str]) -> Dict[str, Any]:
         }
 
 
+def delete_block(block_uid: str) -> Dict[str, Any]:
+    """
+    Delete a single block from the graph by its UID.
+
+    Args:
+        block_uid: UID of the block to delete
+
+    Returns:
+        Result dict with success flag and the deleted UID
+    """
+    if not block_uid:
+        return {"success": False, "error": "Block UID is required"}
+
+    try:
+        execute_write_action({"action": "delete-block", "block": {"uid": block_uid}})
+        return {"success": True, "uid": block_uid}
+    except Exception as e:
+        logger.error(f"Error deleting block {block_uid}: {str(e)}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+def delete_page(page_uid: str) -> Dict[str, Any]:
+    """
+    Delete a page and all of its blocks from the graph by its UID.
+
+    Args:
+        page_uid: UID of the page to delete
+
+    Returns:
+        Result dict with success flag and the deleted UID
+    """
+    if not page_uid:
+        return {"success": False, "error": "Page UID is required"}
+
+    try:
+        execute_write_action({"action": "delete-page", "page": {"uid": page_uid}})
+        return {"success": True, "uid": page_uid}
+    except Exception as e:
+        logger.error(f"Error deleting page {page_uid}: {str(e)}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 def update_content(block_uid: str, content: Optional[str] = None, transform_pattern: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Update a block's content or transform it using a pattern.

@@ -40,7 +40,9 @@ from roam_mcp.content import (
     import_markdown,
     add_todos,
     update_content,
-    update_multiple_contents
+    update_multiple_contents,
+    delete_block,
+    delete_page
 )
 from roam_mcp.memory import (
     remember,
@@ -601,6 +603,54 @@ async def roam_update_multiple_blocks(updates: List[Dict[str, Any]]) -> str:
             return f"Error updating blocks: {result.get('error', 'Unknown error')}"
     except Exception as e:
         logger.error(f"Error updating blocks: {str(e)}", exc_info=True)
+        return format_error_response(e)
+
+
+@mcp.tool()
+async def roam_delete_block(block_uid: str) -> str:
+    """Delete a single block from the graph by its UID.
+
+    Args:
+        block_uid: UID of the block to delete
+    """
+    if not validate_environment():
+        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+
+    try:
+        if not block_uid:
+            return "Error: block_uid is required"
+
+        result = delete_block(block_uid)
+        if result["success"]:
+            return f"Block {block_uid} deleted successfully"
+        else:
+            return f"Error deleting block: {result.get('error', 'Unknown error')}"
+    except Exception as e:
+        logger.error(f"Error deleting block: {str(e)}", exc_info=True)
+        return format_error_response(e)
+
+
+@mcp.tool()
+async def roam_delete_page(page_uid: str) -> str:
+    """Delete a page and all of its blocks from the graph by its UID.
+
+    Args:
+        page_uid: UID of the page to delete
+    """
+    if not validate_environment():
+        return "Error: ROAM_API_TOKEN and ROAM_GRAPH_NAME environment variables must be set"
+
+    try:
+        if not page_uid:
+            return "Error: page_uid is required"
+
+        result = delete_page(page_uid)
+        if result["success"]:
+            return f"Page {page_uid} deleted successfully"
+        else:
+            return f"Error deleting page: {result.get('error', 'Unknown error')}"
+    except Exception as e:
+        logger.error(f"Error deleting page: {str(e)}", exc_info=True)
         return format_error_response(e)
 
 
