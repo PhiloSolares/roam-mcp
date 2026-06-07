@@ -6,7 +6,13 @@ import logging
 from typing import Dict, Any, Optional
 import httpx
 import trafilatura
-from unstructured.partition.pdf import partition_pdf
+
+try:
+    # 'unstructured' is the optional [pdf] extra. Import lazily so the server still runs
+    # (web parsing, all Roam tools) in environments without the heavy PDF dependencies.
+    from unstructured.partition.pdf import partition_pdf
+except ImportError:
+    partition_pdf = None
 
 # Set up logging
 logger = logging.getLogger("roam-mcp.content_parsers")
@@ -72,9 +78,16 @@ async def parse_pdf(url: str) -> Dict[str, Any]:
     Returns:
         Result with parsed content
     """
+    if partition_pdf is None:
+        return {
+            "success": False,
+            "error": "PDF parsing is unavailable: the optional 'unstructured' dependency is not "
+                     "installed. Install it with: pip install 'roam-mcp[pdf]'."
+        }
+
     try:
         logger.debug(f"Fetching PDF content from: {url}")
-        
+
         # Download the PDF to a temporary file
         async with httpx.AsyncClient() as client:
             response = await client.get(url, follow_redirects=True)
