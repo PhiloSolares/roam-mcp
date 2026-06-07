@@ -996,7 +996,7 @@ async def summarize_page(page_title: str) -> dict:
         }
 
 
-def run_server(transport="stdio", port=None, verbose=False):
+def run_server(transport="stdio", host="127.0.0.1", port=None, verbose=False):
     """Run the MCP server with the specified transport."""
     # Configure logging based on verbosity
     setup_logging(verbose)
@@ -1019,7 +1019,8 @@ def run_server(transport="stdio", port=None, verbose=False):
         elif transport == "sse":
             if not port:
                 port = 3000
-            logger.info(f"Starting server with SSE transport on port {port}")
+            logger.info(f"Starting server with SSE transport on {host}:{port}")
+            mcp.settings.host = host
             mcp.settings.port = port
             mcp.run(transport="sse")
         else:

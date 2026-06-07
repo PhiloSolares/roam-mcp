@@ -23,7 +23,13 @@ def main():
         default=3000,
         help="Port for SSE transport (default: 3000)"
     )
-    
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host/interface to bind for SSE transport (default: 127.0.0.1; "
+             "use 0.0.0.0 to accept connections from other hosts/containers)"
+    )
+
     # Verbosity options
     parser.add_argument(
         "-v", "--verbose",
@@ -38,6 +44,7 @@ def main():
     try:
         run_server(
             transport=args.transport,
+            host=args.host,
             port=args.port if args.transport == "sse" else None,
             verbose=args.verbose
         )
