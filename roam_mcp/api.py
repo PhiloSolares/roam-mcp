@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import logging
+import threading
 from typing import Dict, List, Any, Optional, Union, Set, Tuple, Callable
 import requests
 from datetime import datetime
@@ -111,12 +112,19 @@ class QueryError(RoamAPIError):
 
 class RateLimitError(RoamAPIError):
     """Exception raised when rate limits are exceeded."""
-    def __init__(self, message: str, details: Optional[Dict] = None):
+    def __init__(self, message: str, details: Optional[Dict] = None, retry_after: Optional[float] = None):
+        self.retry_after = retry_after
+        remediation = "Retry after a delay or reduce the request frequency."
+        if retry_after:
+            remediation = f"Retry after {retry_after:.1f} seconds."
+            if details is None:
+                details = {}
+            details["retry_after"] = retry_after
         super().__init__(
             message=message,
             code="RATE_LIMIT_ERROR",
             details=details,
-            remediation="Retry after a delay or reduce the request frequency."
+            remediation=remediation
         )
 
 
@@ -138,14 +146,95 @@ class PreserveAuthSession(requests.Session):
         return
 
 
+class RateLimiter:
+    """
+    Thread-safe rate limiter using token bucket algorithm.
+    Ensures minimum delay between API requests to prevent rate limiting.
+    """
+    def __init__(self, min_interval: float = 0.2, burst_size: int = 5):
+        """
+        Initialize rate limiter.
+
+        Args:
+            min_interval: Minimum seconds between requests (default 200ms)
+            burst_size: Number of requests allowed in a burst before throttling
+        """
+        self._min_interval = min_interval
+        self._burst_size = burst_size
+        self._tokens = burst_size
+        self._last_request_time = 0.0
+        self._lock = threading.Lock()
+        self._rate_limit_until = 0.0  # Timestamp until which we're rate limited
+
+    def set_rate_limited(self, retry_after: float):
+        """
+        Set a rate limit period based on server response.
+
+        Args:
+            retry_after: Seconds to wait before next request
+        """
+        with self._lock:
+            self._rate_limit_until = time.time() + retry_after
+            logger.info(f"Rate limited for {retry_after:.1f}s")
+
+    def wait_if_needed(self):
+        """
+        Wait if necessary to comply with rate limits.
+        Call this before making any API request.
+        """
+        with self._lock:
+            now = time.time()
+
+            # Check if we're in a rate-limited period from server response
+            if now < self._rate_limit_until:
+                wait_time = self._rate_limit_until - now
+                logger.debug(f"Waiting {wait_time:.2f}s due to rate limit")
+                time.sleep(wait_time)
+                now = time.time()
+
+            # Replenish tokens based on time passed
+            time_passed = now - self._last_request_time
+            self._tokens = min(self._burst_size, self._tokens + time_passed / self._min_interval)
+
+            # If we have tokens, use one
+            if self._tokens >= 1:
+                self._tokens -= 1
+                self._last_request_time = now
+                return
+
+            # Otherwise, wait for minimum interval
+            wait_time = self._min_interval - time_passed
+            if wait_time > 0:
+                logger.debug(f"Rate limiter: waiting {wait_time:.3f}s")
+                time.sleep(wait_time)
+
+            self._last_request_time = time.time()
+            self._tokens = 0
+
+
+# Global rate limiter instance - shared across all API calls
+# Roam API seems to allow ~10 requests/second, so 200ms between requests with burst of 5
+_rate_limiter = RateLimiter(min_interval=0.2, burst_size=5)
+
+
+def get_rate_limiter() -> RateLimiter:
+    """Get the global rate limiter instance."""
+    return _rate_limiter
+
+
 # Retry decorator for API calls
-def retry_on_error(max_retries=3, base_delay=1, backoff_factor=2, retry_on=(RateLimitError, requests.exceptions.RequestException)):
+def retry_on_error(max_retries=5, base_delay=2, backoff_factor=2, retry_on=(RateLimitError, requests.exceptions.RequestException)):
     """
     Decorator to retry API calls with exponential backoff.
-    
+
+    Special handling for rate limit errors:
+    - Uses Retry-After header if available
+    - Notifies the global rate limiter
+    - Uses longer delays for rate limits
+
     Args:
-        max_retries: Maximum number of retry attempts
-        base_delay: Initial delay in seconds
+        max_retries: Maximum number of retry attempts (default 5 for rate limits)
+        base_delay: Initial delay in seconds (default 2s)
         backoff_factor: Multiplier for delay on each retry
         retry_on: Tuple of exception types to retry on
     """
@@ -161,18 +250,53 @@ def retry_on_error(max_retries=3, base_delay=1, backoff_factor=2, retry_on=(Rate
                     if retries > max_retries:
                         logger.error(f"Maximum retries ({max_retries}) exceeded: {str(e)}")
                         raise
-                    
-                    delay = base_delay * (backoff_factor ** (retries - 1))
-                    logger.warning(f"Retrying after error: {str(e)}. Attempt {retries}/{max_retries} in {delay:.2f}s")
+
+                    # Special handling for rate limit errors
+                    if isinstance(e, RateLimitError):
+                        # Use retry_after if available, otherwise use longer delay
+                        if e.retry_after:
+                            delay = e.retry_after
+                        else:
+                            # For rate limits without Retry-After, use longer delays
+                            delay = base_delay * (backoff_factor ** retries)  # More aggressive backoff
+
+                        # Notify the global rate limiter
+                        _rate_limiter.set_rate_limited(delay)
+                        logger.warning(f"Rate limited. Retry {retries}/{max_retries} in {delay:.1f}s")
+                    else:
+                        delay = base_delay * (backoff_factor ** (retries - 1))
+                        logger.warning(f"Retrying after error: {str(e)}. Attempt {retries}/{max_retries} in {delay:.2f}s")
+
                     time.sleep(delay)
         return wrapper
     return decorator
 
 
+def _extract_retry_after(response: requests.Response) -> Optional[float]:
+    """
+    Extract Retry-After value from response headers.
+
+    Args:
+        response: The HTTP response object
+
+    Returns:
+        Retry delay in seconds, or None if not present
+    """
+    retry_after = response.headers.get('Retry-After')
+    if retry_after:
+        try:
+            # Retry-After can be seconds or a date string
+            return float(retry_after)
+        except ValueError:
+            # Try parsing as HTTP date (not commonly used)
+            logger.debug(f"Could not parse Retry-After header: {retry_after}")
+    return None
+
+
 def validate_credentials():
     """
     Validate that required API credentials are set.
-    
+
     Raises:
         AuthenticationError: If required credentials are missing
     """
@@ -230,17 +354,20 @@ def execute_query(query: str, inputs: Optional[List[Any]] = None) -> Any:
     """
     validate_credentials()
     session, headers = get_session_and_headers()
-    
+
+    # Wait for rate limiter before making request
+    _rate_limiter.wait_if_needed()
+
     # Prepare query data
     data = {
         "query": query,
     }
     if inputs:
         data["inputs"] = inputs
-    
+
     # Log query (without inputs for security)
     logger.debug(f"Executing query: {query}")
-    
+
     # Execute query
     try:
         response = session.post(
@@ -248,12 +375,14 @@ def execute_query(query: str, inputs: Optional[List[Any]] = None) -> Any:
             headers=headers,
             json=data
         )
-        
+
         if response.status_code == 401:
             raise AuthenticationError("Authentication failed", {"status_code": response.status_code})
-        
+
         if response.status_code == 429:
-            raise RateLimitError("Rate limit exceeded", {"status_code": response.status_code})
+            # Extract Retry-After header if present
+            retry_after = _extract_retry_after(response)
+            raise RateLimitError("Rate limit exceeded", {"status_code": response.status_code}, retry_after=retry_after)
         
         response.raise_for_status()
         result = response.json().get('result')
@@ -279,8 +408,9 @@ def execute_query(query: str, inputs: Optional[List[Any]] = None) -> Any:
             if e.response.status_code == 401:
                 raise AuthenticationError("Authentication failed", error_details) from e
             elif e.response.status_code == 429:
-                raise RateLimitError("Rate limit exceeded", error_details) from e
-        
+                retry_after = _extract_retry_after(e.response)
+                raise RateLimitError("Rate limit exceeded", error_details, retry_after=retry_after) from e
+
         logger.error(error_msg, extra={"details": error_details})
         raise QueryError(error_msg, query, error_details) from e
 
@@ -303,7 +433,10 @@ def execute_write_action(action_data: Union[Dict[str, Any], List[Dict[str, Any]]
     """
     validate_credentials()
     session, headers = get_session_and_headers()
-    
+
+    # Wait for rate limiter before making request
+    _rate_limiter.wait_if_needed()
+
     # Check if it's a batch operation or single action
     is_batch = isinstance(action_data, list)
     
@@ -355,8 +488,10 @@ def execute_write_action(action_data: Union[Dict[str, Any], List[Dict[str, Any]]
             raise AuthenticationError("Authentication failed", {"status_code": response.status_code})
         
         if response.status_code == 429:
-            raise RateLimitError("Rate limit exceeded", {"status_code": response.status_code})
-        
+            # Extract Retry-After header if present
+            retry_after = _extract_retry_after(response)
+            raise RateLimitError("Rate limit exceeded", {"status_code": response.status_code}, retry_after=retry_after)
+
         # Special handling for empty responses
         if response.status_code == 200 and not response.text:
             logger.debug("Received empty response with status 200 (success)")
@@ -404,8 +539,9 @@ def execute_write_action(action_data: Union[Dict[str, Any], List[Dict[str, Any]]
             if e.response.status_code == 401:
                 raise AuthenticationError("Authentication failed", error_details) from e
             elif e.response.status_code == 429:
-                raise RateLimitError("Rate limit exceeded", error_details) from e
-        
+                retry_after = _extract_retry_after(e.response)
+                raise RateLimitError("Rate limit exceeded", error_details, retry_after=retry_after) from e
+
         error_msg = f"Write action failed: {str(e)}"
         logger.error(error_msg, extra={"details": error_details})
         raise TransactionError(error_msg, action_type, error_details) from e

@@ -11,6 +11,14 @@ import uuid
 # Set up logging
 logger = logging.getLogger("roam-mcp.utils")
 
+
+def _get_rate_limiter():
+    """
+    Lazy import of rate limiter to avoid circular imports.
+    """
+    from roam_mcp.api import get_rate_limiter
+    return get_rate_limiter()
+
 # Date formatting
 def format_roam_date(date: Optional[datetime] = None) -> str:
     """
@@ -625,7 +633,10 @@ def find_block_uid(session, headers, graph_name: str, block_content: str, max_re
         search_query = f'''[:find ?uid .
                           :where [?e :block/string "{escaped_content}"]
                                  [?e :block/uid ?uid]]'''
-        
+
+        # Wait for rate limiter before making request
+        _get_rate_limiter().wait_if_needed()
+
         response = session.post(
             f'https://api.roamresearch.com/api/graph/{graph_name}/q',
             headers=headers,
@@ -666,7 +677,10 @@ def find_page_by_title(session, headers, graph_name: str, title: str) -> Optiona
     query = f'''[:find ?uid .
                 :where [?e :node/title "{title}"]
                         [?e :block/uid ?uid]]'''
-    
+
+    # Wait for rate limiter before making request
+    _get_rate_limiter().wait_if_needed()
+
     response = session.post(
         f'https://api.roamresearch.com/api/graph/{graph_name}/q',
         headers=headers,
@@ -682,7 +696,10 @@ def find_page_by_title(session, headers, graph_name: str, title: str) -> Optiona
         uid_query = f'''[:find ?title .
                         :where [?e :block/uid "{title}"]
                                 [?e :node/title ?title]]'''
-        
+
+        # Wait for rate limiter before making request
+        _get_rate_limiter().wait_if_needed()
+
         uid_response = session.post(
             f'https://api.roamresearch.com/api/graph/{graph_name}/q',
             headers=headers,
@@ -696,7 +713,10 @@ def find_page_by_title(session, headers, graph_name: str, title: str) -> Optiona
     all_pages_query = f'''[:find ?title ?uid
                          :where [?e :node/title ?title]
                                  [?e :block/uid ?uid]]'''
-    
+
+    # Wait for rate limiter before making request
+    _get_rate_limiter().wait_if_needed()
+
     all_pages_response = session.post(
         f'https://api.roamresearch.com/api/graph/{graph_name}/q',
         headers=headers,
@@ -742,7 +762,10 @@ def resolve_block_references(session, headers, graph_name: str, content: str, ma
             query = f'''[:find ?string .
                         :where [?b :block/uid "{ref}"]
                                 [?b :block/string ?string]]'''
-            
+
+            # Wait for rate limiter before making request
+            _get_rate_limiter().wait_if_needed()
+
             response = session.post(
                 f'https://api.roamresearch.com/api/graph/{graph_name}/q',
                 headers=headers,
