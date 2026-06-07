@@ -1022,6 +1022,17 @@ def run_server(transport="stdio", host="127.0.0.1", port=None, verbose=False):
             logger.info(f"Starting server with {transport} transport on {host}:{port}")
             mcp.settings.host = host
             mcp.settings.port = port
+            # When bound to a non-loopback interface (e.g. for containers / other hosts), the SDK's
+            # default DNS-rebinding protection rejects those Host headers with 421. Bound that way
+            # the operator has opted into network exposure (deploy behind a firewall), so relax it.
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                try:
+                    from mcp.server.transport_security import TransportSecuritySettings
+                    mcp.settings.transport_security = TransportSecuritySettings(
+                        enable_dns_rebinding_protection=False
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not relax transport security: {e}")
             mcp.run(transport=transport)
         else:
             logger.error(f"Unsupported transport: {transport}")
